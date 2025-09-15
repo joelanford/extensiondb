@@ -53,6 +53,38 @@ func catalogFromRow(row *sql.Row) (*models.Catalog, error) {
 	return &catalog, nil
 }
 
+func (q Query) GetOrCreateCatalogDigest(ctx context.Context, c *models.Catalog, digest string) (*models.CatalogDigest, error) {
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error starting transaction: %w", err)
+	}
+
+	row := tx.QueryRowContext(ctx, `INSERT INTO catalog_digests (catalog_id, digest) VALUES ($1, $2) ON CONFLICT (catalog_id, digest) DO NOTHING RETURNING *`, c.ID, digest)
+
+	catalogDigest, err := catalogDigestFromRow(row)
+	if err == nil {
+		return catalogDigest, tx.Commit()
+	}
+
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("error inserting catalog digest: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("error committing query: %w", err)
+	}
+
+	return catalogDigestFromRow(q.db.QueryRowContext(ctx, `SELECT * FROM catalog_digests WHERE catalog_id = $1 AND digest = $2`, c.ID, digest))
+}
+
+func catalogDigestFromRow(row *sql.Row) (*models.CatalogDigest, error) {
+	var catalogDigest models.CatalogDigest
+	if err := row.Scan(&catalogDigest.ID, &catalogDigest.CatalogID, &catalogDigest.Digest, &catalogDigest.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &catalogDigest, nil
+}
+
 func (q Query) GetOrCreatePackage(ctx context.Context, name string) (*models.Package, error) {
 	tx, err := q.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -179,11 +211,11 @@ func bundleFromRow(row *sql.Row) (*models.Bundle, error) {
 	return &b, nil
 }
 
-func (q Query) EnsureCatalogBundleReference(ctx context.Context, c *models.Catalog, br *models.BundleReference) error {
-	if _, err := q.db.ExecContext(ctx, `INSERT INTO catalog_bundle_references (
-		catalog_id, bundle_reference_id
-	) VALUES ($1, $2) ON CONFLICT (catalog_id, bundle_reference_id) DO NOTHING;`, c.ID, br.ID); err != nil {
-		return fmt.Errorf("error inserting catalog_bundle_reference: %w", err)
+func (q Query) EnsureCatalogDigestBundleReference(ctx context.Context, cd *models.CatalogDigest, br *models.BundleReference) error {
+	if _, err := q.db.ExecContext(ctx, `INSERT INTO catalog_digest_bundle_references (
+		catalog_digest_id, bundle_reference_id
+	) VALUES ($1, $2) ON CONFLICT (catalog_digest_id, bundle_reference_id) DO NOTHING;`, cd.ID, br.ID); err != nil {
+		return fmt.Errorf("error inserting catalog_digest_bundle_reference: %w", err)
 	}
 	return nil
 }

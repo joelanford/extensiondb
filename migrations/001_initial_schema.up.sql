@@ -5,10 +5,15 @@ CREATE TABLE catalogs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     "name" TEXT NOT NULL,
     tag TEXT NOT NULL,
+    digest TEXT NOT NULL,
 
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
 
-    UNIQUE ("name", tag)
+    UNIQUE ("name", tag),
+
+    CONSTRAINT valid_digest CHECK (
+        digest ~ '^sha256:[a-f0-9]{64}$'
+    )
 );
 
 CREATE TABLE packages (
@@ -67,13 +72,27 @@ CREATE TABLE bundle_references (
     )
 );
 
-CREATE TABLE catalog_bundle_references (
-    catalog_id UUID REFERENCES catalogs(id) ON DELETE CASCADE,
+CREATE TABLE catalog_digests (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    catalog_id UUID REFERENCES catalogs(id),
+    digest TEXT NOT NULL,
+
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+
+    UNIQUE (catalog_id, digest),
+
+    CONSTRAINT valid_digest CHECK (
+        digest ~ '^sha256:[a-f0-9]{64}$'
+    )
+);
+
+CREATE TABLE catalog_digest_bundle_references (
+    catalog_digest_id UUID REFERENCES catalog_digests(id) ON DELETE CASCADE,
     bundle_reference_id UUID REFERENCES bundle_references(id) ON DELETE CASCADE,
 
-    CONSTRAINT catalog_bundle_references_pkey PRIMARY KEY (catalog_id, bundle_reference_id)  -- explicit pk
+    CONSTRAINT catalog_digest_bundle_references_pkey PRIMARY KEY (catalog_digest_id, bundle_reference_id)  -- explicit pk
 );
-CREATE INDEX idx_catalog_bundle_references_bundle_reference_id ON catalog_bundle_references (bundle_reference_id);
+CREATE INDEX idx_catalog_digest_bundle_references_bundle_reference_id ON catalog_digest_bundle_references (bundle_reference_id);
 
 CREATE TABLE bundle_reference_bundles (
     bundle_id UUID REFERENCES bundles(id) ON DELETE CASCADE,

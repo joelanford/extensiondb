@@ -25,6 +25,15 @@ type Catalog struct {
 	CreatedAt sql.NullTime
 }
 
+type CatalogDigest struct {
+	ID        string
+	CatalogID string
+
+	Digest string
+
+	CreatedAt sql.NullTime
+}
+
 type Package struct {
 	ID string
 

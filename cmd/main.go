@@ -67,17 +67,35 @@ func main() {
 	}
 }
 
+func readCatalogDigest(catalogDir string) (string, error) {
+	digestFile := filepath.Join(catalogDir, ".metadata", "digest")
+	digestBytes, err := os.ReadFile(digestFile)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("sha256:%s", strings.TrimSpace(string(digestBytes))), nil
+}
+
 func buildDB(ctx context.Context, catalogsDir string, q *query.Query, catalogNames []string, catalogTags []string) error {
 	for _, catalogName := range catalogNames {
 		for _, catalogTag := range catalogTags {
 			fmt.Printf("Processing catalog %s:%s\n", catalogName, catalogTag)
+
+			catalogDir := filepath.Join(catalogsDir, catalogName, strings.TrimPrefix(catalogTag, "v"))
 
 			c, err := q.GetOrCreateCatalog(ctx, catalogName, catalogTag)
 			if err != nil {
 				return fmt.Errorf("error creating catalog %s:%s: %w", catalogName, catalogTag, err)
 			}
 
-			catalogDir := filepath.Join(catalogsDir, catalogName, strings.TrimPrefix(catalogTag, "v"))
+			catalogDigest, err := readCatalogDigest(catalogDir)
+			if err != nil {
+				return fmt.Errorf("error reading catalog digest for %s:%s: %w", catalogName, catalogTag, err)
+			}
+			cd, err := q.GetOrCreateCatalogDigest(ctx, c, catalogDigest)
+			if err != nil {
+				return fmt.Errorf("error creating catalog digest for %s:%s: %w", catalogName, catalogTag, err)
+			}
 
 			imageRefChan := make(chan reference.Named)
 			imageRefs := make([]reference.Named, 0)
@@ -147,7 +165,7 @@ func buildDB(ctx context.Context, catalogsDir string, q *query.Query, catalogNam
 						return fmt.Errorf("error creating bundle reference %s: %w", imageRef, err)
 					}
 
-					if err := q.EnsureCatalogBundleReference(ctx, c, br); err != nil {
+					if err := q.EnsureCatalogDigestBundleReference(ctx, cd, br); err != nil {
 						return fmt.Errorf("error ensuring catalog bundle reference %s: %w", imageRef, err)
 					}
 

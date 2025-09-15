@@ -1,5 +1,27 @@
 DROP VIEW IF EXISTS newest_bundle_builds_by_package;
 DROP VIEW IF EXISTS bundle_builds;
+DROP VIEW IF EXISTS newest_catalog_digests;
+
+CREATE VIEW newest_catalog_digests AS
+WITH ranked_digests_cte AS (
+    SELECT
+        id,
+        catalog_id,
+	digest,
+        created_at,
+        ROW_NUMBER() OVER(PARTITION BY catalog_id ORDER BY created_at DESC) AS rn
+    FROM
+        catalog_digests
+)
+SELECT
+    id,
+    catalog_id,
+    digest,
+    created_at
+FROM
+    ranked_digests_cte
+WHERE
+    rn = 1;
 
 CREATE VIEW bundle_builds AS
 SELECT
@@ -11,10 +33,12 @@ SELECT
 FROM bundles AS b
 JOIN bundle_reference_bundles AS brb
     ON b.id = brb.bundle_id
-JOIN catalog_bundle_references AS crb
-    ON brb.bundle_reference_id = crb.bundle_reference_id
+JOIN catalog_digest_bundle_references AS cdrb
+    ON brb.bundle_reference_id = cdrb.bundle_reference_id
+JOIN newest_catalog_digests AS cd
+    ON cdrb.catalog_digest_id = cd.id
 JOIN catalogs AS c
-    ON crb.catalog_id = c.id
+    ON cd.catalog_id = c.id
 JOIN packages AS p
     ON p.id = b.package_id;
 
@@ -41,3 +65,4 @@ SELECT package_name, version, created, catalog_name, STRING_AGG(catalog_tag, ', 
 
 DROP VIEW newest_bundle_builds_by_package;
 DROP VIEW bundle_builds;
+DROP VIEW newest_catalog_digests;
