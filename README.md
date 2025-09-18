@@ -101,17 +101,6 @@ PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d extensiondb
 SELECT name, tag FROM catalogs ORDER BY name, tag;
 ```
 
-#### Find packages in a specific catalog
-```sql
-SELECT DISTINCT p.name 
-FROM packages p
-JOIN bundles b ON p.id = b.package_id
-JOIN bundle_reference_bundles brb ON b.id = brb.bundle_id
-JOIN catalog_bundle_references cbr ON brb.bundle_reference_id = cbr.bundle_reference_id
-JOIN catalogs c ON cbr.catalog_id = c.id
-WHERE c.name = 'redhat-operator-index' AND c.tag = '4.20';
-```
-
 #### Find missing bundles (referenced but not stored)
 ```sql
 PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d extensiondb -f examples/missing_bundles.sql
