@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
-	"os"
+	"math"
 	"os/signal"
 	"slices"
 	"strconv"
@@ -16,42 +16,83 @@ import (
 	"github.com/RyanCarrier/dijkstra/v2"
 	"github.com/blang/semver/v4"
 	"github.com/joelanford/extensiondb/internal/db"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 
-func main() {
-	if len(os.Args) != 2 {
-		fmt.Println("Usage: upgrade-graph <packageName>")
+type SemverVersionFlag struct {
+	semver.Version
+}
+
+func (s *SemverVersionFlag) String() string {
+	return s.Version.String()
+}
+
+func (s *SemverVersionFlag) Set(str string) error {
+	v, err := semver.Parse(str)
+	if err != nil {
+		return err
 	}
-	packageName := os.Args[1]
+	s.Version = v
+	return nil
+}
+
+func (s *SemverVersionFlag) Type() string {
+	return "semver.Version"
+}
+
+var _ pflag.Value = (*SemverVersionFlag)(nil)
+
+func main() {
+	var (
+		pdb       *db.DB
+		minV      = SemverVersionFlag{Version: semver.MustParse("0.0.0-0")}
+		maxV      = SemverVersionFlag{Version: semver.Version{Major: math.MaxUint64, Minor: math.MaxUint64, Patch: math.MaxUint64}}
+		bestEdges bool
+	)
+	cmd := cobra.Command{
+		Use:  "upgrade-graph <packageName>",
+		Args: cobra.ExactArgs(1),
+		PreRun: func(cmd *cobra.Command, _ []string) {
+			var err error
+			pdb, err = db.NewDB(db.Config{
+				Host:     "localhost",
+				Port:     5432,
+				User:     "postgres",
+				Password: "postgres",
+				DBName:   "extensiondb",
+				SSLMode:  "disable",
+			})
+			if err != nil {
+				log.Fatalf("Failed to connect to database: %v", err)
+			}
+
+			// Run migrations
+			if err := pdb.RunMigrations("migrations"); err != nil {
+				log.Fatalf("Failed to run migrations: %v", err)
+			}
+		},
+		Run: func(cmd *cobra.Command, args []string) {
+			packageName := args[0]
+			if err := printGraphForPackage(cmd.Context(), pdb, packageName, minV.Version, maxV.Version, bestEdges); err != nil {
+				log.Fatal(err)
+			}
+		},
+	}
+	cmd.Flags().Var(&minV, "min-version", "minimum version")
+	cmd.Flags().Var(&maxV, "max-version", "minimum version")
+	cmd.Flags().BoolVar(&bestEdges, "best-edges", true, "only show best edges in the graph")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	pdb, err := db.NewDB(db.Config{
-		Host:     "localhost",
-		Port:     5432,
-		User:     "postgres",
-		Password: "postgres",
-		DBName:   "extensiondb",
-		SSLMode:  "disable",
-	})
-	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
-	}
-
-	// Run migrations
-	if err := pdb.RunMigrations("migrations"); err != nil {
-		log.Fatalf("Failed to run migrations: %v", err)
-	}
-
-	if err := printGraphForPackage(ctx, pdb, packageName, semver.MustParse("0.0.0"), semver.MustParse("99999.99999.99999"), true); err != nil {
-		log.Fatalf("Failed to list bundles for package: %v", err)
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		log.Fatal(err)
 	}
 }
 
 type bundle struct {
-	idx     int
 	name    string
 	version semver.Version
 	created time.Time

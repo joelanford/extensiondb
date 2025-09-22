@@ -1,0 +1,18 @@
+SELECT
+  c.name as catalog_name,
+  p.name as package_name,
+  b.version
+FROM
+  catalogs as c
+JOIN catalog_digests as cd
+  on c.id = cd.catalog_id
+JOIN catalog_digest_bundle_references as cdbr
+  on cd.id = cdbr.catalog_digest_id
+JOIN bundle_reference_bundles as brb
+  on cdbr.bundle_reference_id = brb.bundle_reference_id
+JOIN bundles as b
+  on brb.bundle_id = b.id
+JOIN packages as p
+  on b.package_id = p.id
+WHERE c.tag = 'v4.14' AND c.name = 'redhat-operator-index' AND p.name = 'quay-operator'
+ORDER BY b.version;
