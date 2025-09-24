@@ -19,6 +19,7 @@ require (
 	github.com/spf13/pflag v1.0.7
 	go.podman.io/image/v5 v5.37.0
 	golang.org/x/sync v0.16.0
+	gonum.org/v1/gonum v0.16.0
 	k8s.io/apimachinery v0.33.4
 	oras.land/oras-go/v2 v2.6.0
 	sigs.k8s.io/yaml v1.6.0

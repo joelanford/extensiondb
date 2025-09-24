@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"maps"
+	"math"
 	"os"
 	"regexp"
 	"slices"
@@ -21,6 +23,8 @@ import (
 	"github.com/dominikbraun/graph"
 	"github.com/joelanford/extensiondb/internal/db"
 	"go.podman.io/image/v5/docker/reference"
+	"gonum.org/v1/gonum/graph/path"
+	"gonum.org/v1/gonum/graph/simple"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/yaml"
 )
@@ -54,20 +58,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := bs.validate(); err != nil {
-		log.Fatal(err)
-	}
 
-	targets := []majorMinor{
-		//{4, 12},
-		//{4, 14},
-		//{4, 15},
-		//{4, 16},
-		{4, 17},
-		{4, 18},
-		{4, 19},
-	}
-	g, err := newGraph(tmpl, targets, bs)
+	g, err := newGraph(tmpl, bs)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -77,12 +69,79 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Println(m)
+
+	sp, weight, err := g.preferredPathToOCPVersion(bs[0], majorMinor{4, 19}, preferenceHighestVersion())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf(sp[0].String())
+	for i := range sp[1:] {
+		e, _ := g.global.Edge(sp[i], sp[i+1])
+		fmt.Printf(" -(%d)-> %s", e.Properties.Weight, sp[i+1].String())
+	}
+	fmt.Println()
+	fmt.Println(weight)
 }
 
 type upgradeGraph struct {
 	global          graph.Graph[*bundle, *bundle]
-	targets         map[majorMinor]graph.Graph[*bundle, *bundle]
 	lifecycleStates map[majorMinor]string
+}
+
+func (g *upgradeGraph) getSupportedOpenshiftVersions(b *bundle) (sets.Set[majorMinor], error) {
+	_, props, err := g.global.VertexWithProperties(b)
+	if err != nil {
+		return nil, err
+	}
+	propStr := props.Attributes["supportedOpenshiftVersions"]
+	supportedOpenshiftVersionsStrs := strings.Split(propStr, "|")
+	supportedOpenshiftVersions := sets.New[majorMinor]()
+	for _, str := range supportedOpenshiftVersionsStrs {
+		mm, err := newMajorMinorFromString(str)
+		if err != nil {
+			return nil, err
+		}
+		supportedOpenshiftVersions.Insert(mm)
+	}
+	return supportedOpenshiftVersions, nil
+}
+
+func preferenceHighestVersion() func(*bundle, *bundle) int {
+	return func(a *bundle, b *bundle) int {
+		return b.compare(a)
+	}
+}
+
+func (g *upgradeGraph) preferredPathToOCPVersion(from *bundle, toOCPVersion majorMinor, preference func(*bundle, *bundle) int) ([]*bundle, float64, error) {
+	// get all bundles available in desired OCP version
+	var availableInTarget []*bundle
+	am, err := g.global.AdjacencyMap()
+	if err != nil {
+		return nil, 0, err
+	}
+	for b := range am {
+		supportedOpenshiftVersions, err := g.getSupportedOpenshiftVersions(b)
+		if err != nil {
+			return nil, 0, err
+		}
+		if !supportedOpenshiftVersions.Has(toOCPVersion) {
+			continue
+		}
+		availableInTarget = append(availableInTarget, b)
+	}
+
+	// sort by preference
+	slices.SortFunc(availableInTarget, preference)
+
+	// as soon as we find a path, return it.
+	for _, to := range availableInTarget {
+		sp, weight, err := g.shortestPath(from, to)
+		if err == nil {
+			return sp, weight, nil
+		}
+	}
+	return nil, 0, graph.ErrTargetNotReachable
 }
 
 func (g *upgradeGraph) mermaid(onlyShortestPaths bool) (string, error) {
@@ -100,59 +159,52 @@ func (g *upgradeGraph) mermaid(onlyShortestPaths bool) (string, error) {
 	sb.WriteString("  classDef darkorange fill:#b50,color:#fff,stroke:#333,stroke-width:4px;\n")
 	sb.WriteString("  classDef darkred fill:#b00,color:#fff,stroke:#333,stroke-width:4px;\n\n")
 
-	sortedTargets := slices.SortedFunc(maps.Keys(g.targets), func(a, b majorMinor) int {
-		return a.compare(b)
-	})
+	sb.WriteString("  classDef head fill:#cfc,color:#000,stroke:#333,stroke-width:4px;\n\n")
 
 	linkCount := 0
 	linkColors := map[string][]string{}
-	for _, tgt := range sortedTargets {
-		subgraph := g.targets[tgt]
-		am, err := subgraph.AdjacencyMap()
-		if err != nil {
-			return "", err
-		}
-		pm, err := subgraph.PredecessorMap()
-		if err != nil {
-			return "", err
-		}
 
-		vGroups := map[majorMinor][]*bundle{}
-		sortedTos := slices.SortedFunc(maps.Keys(pm), func(a *bundle, b *bundle) int {
-			return a.compare(b)
-		})
-		for _, b := range sortedTos {
-			mm := majorMinor{Major: b.Version.Major, Minor: b.Version.Minor}
-			vGroups[mm] = append(vGroups[mm], b)
-		}
+	subgraph := g.global
+	am, err := subgraph.AdjacencyMap()
+	if err != nil {
+		return "", err
+	}
+	pm, err := subgraph.PredecessorMap()
+	if err != nil {
+		return "", err
+	}
 
-		sb.WriteString(fmt.Sprintf("  subgraph %s\n", tgt))
-		for _, node := range sortedTos {
-			sb.WriteString(fmt.Sprintf("    %s_%s[%s]%s\n", tgt, node.ID(), node.ID(), g.nodeClass(tgt, node, len(am[node]) == 0)))
-		}
+	vGroups := map[majorMinor][]*bundle{}
+	sortedTos := slices.SortedFunc(maps.Keys(pm), func(a *bundle, b *bundle) int {
+		return a.compare(b)
+	})
+	for _, b := range sortedTos {
+		mm := majorMinor{Major: b.Version.Major, Minor: b.Version.Minor}
+		vGroups[mm] = append(vGroups[mm], b)
+	}
 
-		sortedVGroups := slices.SortedFunc(maps.Keys(vGroups), func(a, b majorMinor) int {
-			return a.compare(b)
-		})
-		for _, mm := range sortedVGroups {
-			vGroup := vGroups[mm]
-			subgraphID := fmt.Sprintf("%s_%s", tgt, mm)
-			sb.WriteString(fmt.Sprintf("\n    subgraph %s[%s]\n", subgraphID, mm))
-			for _, to := range vGroup {
-				for from, e := range pm[to] {
-					sp, style, color := g.edgeInfo(e)
-					if !sp && onlyShortestPaths {
-						continue
-					}
-					linkColors[color] = append(linkColors[color], strconv.Itoa(linkCount))
-					sb.WriteString(fmt.Sprintf("      %s_%s %s %s_%s\n", tgt, from.ID(), style, tgt, to.ID()))
-					linkCount++
+	sortedVGroups := slices.SortedFunc(maps.Keys(vGroups), func(a, b majorMinor) int {
+		return a.compare(b)
+	})
+	for _, mm := range sortedVGroups {
+		vGroup := vGroups[mm]
+		//subgraphString := fmt.Sprintf("%s", mm)
+		//sb.WriteString(fmt.Sprintf("\n    subgraph %s[%s]\n", subgraphString, mm))
+		for _, to := range vGroup {
+			sb.WriteString(fmt.Sprintf("    %s%s\n", to.String(), g.nodeClass(to, len(am[to]) == 0)))
+
+			for from, e := range pm[to] {
+				sp, style, color := g.edgeInfo(e)
+				if !sp && onlyShortestPaths {
+					continue
 				}
+				linkColors[color] = append(linkColors[color], strconv.Itoa(linkCount))
+				sb.WriteString(fmt.Sprintf("    %s %s %s\n", from.String(), style, to.String()))
+				linkCount++
 			}
-			sb.WriteString("    end\n")
-			sb.WriteString(fmt.Sprintf("    style %s %s\n", subgraphID, g.subgraphStyle(mm)))
 		}
-		sb.WriteString("  end\n\n")
+		//sb.WriteString("    end\n")
+		//sb.WriteString(fmt.Sprintf("    style %s %s\n", subgraphString, g.subgraphStyle(mm)))
 	}
 
 	for color, links := range linkColors {
@@ -190,76 +242,62 @@ func (g *upgradeGraph) edgeInfo(edge graph.Edge[*bundle]) (bool, string, string)
 	return false, "-.->", "gray"
 }
 
-func (g *upgradeGraph) nodeClass(tgt majorMinor, node *bundle, isHead bool) string {
-	prefix := ""
+func (g *upgradeGraph) nodeClass(node *bundle, isHead bool) string {
 	if isHead {
-		prefix = "dark"
-	}
-
-	_, attrs, _ := g.targets[tgt].VertexWithProperties(node)
-	maxOCPVersionStr := attrs.Attributes["olm.maxOpenshiftVersion"]
-	maxOCPVersion, err := newMajorMinorFromString(maxOCPVersionStr)
-	if err != nil {
-		panic(fmt.Sprintf("Invalid node %q: invalid major/minor version %q in olm.maxOpenshiftVersion attribute: %v", node.ID(), maxOCPVersionStr, err))
-	}
-	v := maxOCPVersion.compare(tgt)
-	switch v {
-	case -1:
-		return fmt.Sprintf(":::%sred", prefix)
-	case 0:
-		return fmt.Sprintf(":::%sorange", prefix)
-	case 1:
-		eusTgt := majorMinor{Major: tgt.Major, Minor: tgt.Minor + 2}
-		if maxOCPVersion.compare(eusTgt) < 0 {
-			return fmt.Sprintf(":::%syellow", prefix)
-		}
-		return fmt.Sprintf(":::%sgreen", prefix)
+		return ":::head"
 	}
 	return ""
 }
 
-func (g *upgradeGraph) initializeForTarget(tmpl template, tgt majorMinor, bundles []bundle) error {
-	versions := tmpl.versionsForTarget(tgt)
-	tgtGraph := graph.New[*bundle, *bundle](func(a *bundle) *bundle { return a }, graph.Directed(), graph.PreventCycles())
+func (g *upgradeGraph) initialize(tmpl template, bundles []*bundle) error {
+	gr := graph.New[*bundle, *bundle](func(a *bundle) *bundle { return a }, graph.Directed(), graph.PreventCycles())
 
-	var seen []*bundle
+	versionsByMajorMinor := map[majorMinor]majorMinorVersion{}
+	for _, v := range tmpl.Versions {
+		slices.SortFunc(v.Targets, func(a majorMinor, b majorMinor) int {
+			return b.compare(a)
+		})
+		versionsByMajorMinor[v.Version] = v
+	}
+
+	var (
+		seen []*bundle
+		errs []error
+	)
 	for _, b := range bundles {
-		for _, v := range versions {
-			if v.matchesVersion(b.Version) {
-				slices.SortFunc(v.Targets, func(a majorMinor, b majorMinor) int {
-					return b.compare(a)
-				})
-				if err := tgtGraph.AddVertex(&b, graph.VertexAttribute("olm.maxOpenshiftVersion", v.Targets[0].String())); err != nil {
-					return fmt.Errorf("error adding bundle %q to graph: %v", b.ID(), err)
-				}
+		mm := majorMinor{Major: b.Version.Major, Minor: b.Version.Minor}
+		v, ok := versionsByMajorMinor[mm]
+		if !ok {
+			errs = append(errs, fmt.Errorf("invalid template: bundle image %s is in version %d.%d, but that version is not listed in the template versions", b.Reference.String(), b.Version.Major, b.Version.Minor))
+			continue
+		}
+		supportedOpenshiftVersions := []string{}
+		for _, tgt := range v.Targets {
+			supportedOpenshiftVersions = append(supportedOpenshiftVersions, tgt.String())
+		}
+		if err := gr.AddVertex(b, graph.VertexAttribute("supportedOpenshiftVersions", strings.Join(supportedOpenshiftVersions, "|"))); err != nil {
+			return fmt.Errorf("error adding bundle %q to graph: %v", b.String(), err)
+		}
 
-				for _, a := range seen {
-					if a.Version.LT(b.Version) && a.Version.GTE(v.MinUpgradeVersion) {
-						if err := tgtGraph.AddEdge(a, &b); err != nil {
-							return fmt.Errorf("error adding edge %s -> %s to graph: %v", a.ID(), b.ID(), err)
-						}
-					}
+		for _, a := range seen {
+			if a.Version.LT(b.Version) && a.Version.GTE(v.MinUpgradeVersion) {
+				if err := gr.AddEdge(a, b); err != nil {
+					return fmt.Errorf("error adding edge %s -> %s to graph: %v", a.String(), b.String(), err)
 				}
-
-				seen = append(seen, &b)
-				break
 			}
 		}
-	}
 
-	gam, err := g.global.AdjacencyMap()
-	if err != nil {
-		return err
+		seen = append(seen, b)
 	}
-	for n := range gam {
-		fmt.Println(n.ID())
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 
 	var (
 		highestVersion *bundle
 		heads          = sets.New[*bundle]()
 	)
-	am, err := tgtGraph.AdjacencyMap()
+	am, err := gr.AdjacencyMap()
 	if err != nil {
 		return err
 	}
@@ -272,12 +310,27 @@ func (g *upgradeGraph) initializeForTarget(tmpl template, tgt majorMinor, bundle
 		}
 	}
 
-	for from := range am {
+	sortedFroms := slices.SortedFunc(maps.Keys(am), func(a *bundle, b *bundle) int {
+		return a.compare(b)
+	})
+
+	for _, from := range sortedFroms {
+		sortedTos := slices.SortedFunc(maps.Keys(am[from]), func(a *bundle, b *bundle) int {
+			return b.compare(a)
+		})
+		for i, to := range sortedTos {
+			if err := gr.UpdateEdge(from, to, graph.EdgeWeight(i+1)); err != nil {
+				return err
+			}
+		}
+	}
+
+	for _, from := range sortedFroms {
 		for _, to := range heads.UnsortedList() {
 			if heads.Has(from) {
 				continue
 			}
-			sp, err := graph.ShortestPath(tgtGraph, from, to)
+			sp, _, err := shortestPath(gr, from, to)
 			if err != nil {
 				continue
 			}
@@ -287,28 +340,26 @@ func (g *upgradeGraph) initializeForTarget(tmpl template, tgt majorMinor, bundle
 			} else {
 				opts = append(opts, graph.EdgeAttribute("shortestPathToNonHighestHead", "true"))
 			}
-			if err := tgtGraph.UpdateEdge(sp[0], sp[1], opts...); err != nil {
+			if err := gr.UpdateEdge(sp[0], sp[1], opts...); err != nil {
 				return err
 			}
 		}
 	}
 
-	g.targets[tgt] = tgtGraph
+	g.global = gr
 	return nil
 }
 
-func newGraph(tmpl template, tgts []majorMinor, bundles []bundle) (*upgradeGraph, error) {
+func newGraph(tmpl template, bundles []*bundle) (*upgradeGraph, error) {
 	ug := &upgradeGraph{
 		global:          graph.New[*bundle, *bundle](func(a *bundle) *bundle { return a }, graph.Directed(), graph.PreventCycles()),
-		targets:         map[majorMinor]graph.Graph[*bundle, *bundle]{},
 		lifecycleStates: map[majorMinor]string{},
 	}
 
-	for _, tgt := range tgts {
-		if err := ug.initializeForTarget(tmpl, tgt, bundles); err != nil {
-			return nil, fmt.Errorf("error initializing graph: %v", err)
-		}
+	if err := ug.initialize(tmpl, bundles); err != nil {
+		return nil, fmt.Errorf("error initializing graph: %v", err)
 	}
+
 	now := time.Now()
 	for _, mmv := range tmpl.Versions {
 		ug.lifecycleStates[mmv.Version] = mmv.lifecycleState(now)
@@ -500,40 +551,6 @@ func (i *imageRef) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-type bundles []bundle
-
-func (bs bundles) validate() error {
-	for _, f := range []func() error{
-		bs.validateSamePackage,
-	} {
-		if err := f(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (bs bundles) validateSamePackage() error {
-	pkgs := sets.New[string]()
-	for _, b := range bs {
-		pkgs.Insert(b.PackageName)
-	}
-	if len(pkgs) != 1 {
-		return fmt.Errorf("policy[singlepackage]: bundles contain more than one package: %v", sets.List(pkgs))
-	}
-	return nil
-}
-
-func (tmpl template) versionsForTarget(tgt majorMinor) []majorMinorVersion {
-	versions := []majorMinorVersion{}
-	for _, v := range tmpl.Versions {
-		if slices.Contains(v.Targets, tgt) {
-			versions = append(versions, v)
-		}
-	}
-	return versions
-}
-
 type bundle struct {
 	PackageName string
 	Version     semver.Version
@@ -542,12 +559,18 @@ type bundle struct {
 	BuiltAt     time.Time
 }
 
-func (b bundle) ID() string {
+func (b bundle) String() string {
 	id := fmt.Sprintf("v%s", b.Version)
 	if b.Release != nil {
 		id += fmt.Sprintf("_%s", *b.Release)
 	}
 	return id
+}
+
+func (b bundle) ID() int64 {
+	h := fnv.New64a()
+	h.Write([]byte(b.String()))
+	return int64(h.Sum64())
 }
 
 func (b *bundle) compare(other *bundle) int {
@@ -566,7 +589,7 @@ func (b *bundle) compare(other *bundle) int {
 	return cmp.Compare(*b.Release, *other.Release)
 }
 
-func queryBundles(ctx context.Context, pdb *db.DB, refs []imageRef) (bundles, error) {
+func queryBundles(ctx context.Context, pdb *db.DB, refs []imageRef) ([]*bundle, error) {
 	placeholders := make([]string, 0, len(refs))
 	params := make([]any, 0, len(refs)*2)
 	for i, ref := range refs {
@@ -587,7 +610,7 @@ func queryBundles(ctx context.Context, pdb *db.DB, refs []imageRef) (bundles, er
 	}
 	defer rows.Close()
 
-	var bs bundles
+	var bs []*bundle
 	for rows.Next() {
 		var (
 			b   bundle
@@ -597,7 +620,57 @@ func queryBundles(ctx context.Context, pdb *db.DB, refs []imageRef) (bundles, er
 			return nil, err
 		}
 		b.Reference = refLookup[ref]
-		bs = append(bs, b)
+		bs = append(bs, &b)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if err := validateSamePackage(bs); err != nil {
+		return nil, err
+	}
+
 	return bs, nil
+}
+
+func validateSamePackage(bundles []*bundle) error {
+	pkgs := sets.New[string]()
+	for _, b := range bundles {
+		pkgs.Insert(b.PackageName)
+	}
+	if len(pkgs) != 1 {
+		return fmt.Errorf("policy[singlepackage]: bundles contain more than one package: %v", sets.List(pkgs))
+	}
+	return nil
+}
+
+func shortestPath(gr graph.Graph[*bundle, *bundle], from *bundle, to *bundle) ([]*bundle, float64, error) {
+	am, err := gr.AdjacencyMap()
+	if err != nil {
+		return nil, math.Inf(1), err
+	}
+	wg := simple.NewWeightedDirectedGraph(0, math.Inf(1))
+	for a := range am {
+		for b, e := range am[a] {
+			wg.SetWeightedEdge(simple.WeightedEdge{
+				F: a,
+				T: b,
+				W: float64(e.Properties.Weight),
+			})
+		}
+	}
+	sp, weight := path.DijkstraFromTo(from, to, wg)
+	if len(sp) == 0 {
+		return nil, math.Inf(1), graph.ErrTargetNotReachable
+	}
+
+	var out []*bundle
+	for _, b := range sp {
+		out = append(out, b.(*bundle))
+	}
+	return out, weight, nil
+}
+
+func (ug *upgradeGraph) shortestPath(from *bundle, to *bundle) ([]*bundle, float64, error) {
+	return shortestPath(ug.global, from, to)
 }
