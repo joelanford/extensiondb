@@ -87,6 +87,9 @@ func main() {
 type upgradeGraph struct {
 	global          graph.Graph[*bundle, *bundle]
 	lifecycleStates map[majorMinor]string
+	highestVersion  *bundle
+	adjacency       map[*bundle]map[*bundle]graph.Edge[*bundle]
+	predecessors    map[*bundle]map[*bundle]graph.Edge[*bundle]
 }
 
 func (g *upgradeGraph) getSupportedOpenshiftVersions(b *bundle) (sets.Set[majorMinor], error) {
@@ -116,16 +119,9 @@ func preferenceHighestVersion() func(*bundle, *bundle) int {
 func (g *upgradeGraph) preferredPathToOCPVersion(from *bundle, toOCPVersion majorMinor, preference func(*bundle, *bundle) int) ([]*bundle, float64, error) {
 	// get all bundles available in desired OCP version
 	var availableInTarget []*bundle
-	am, err := g.global.AdjacencyMap()
-	if err != nil {
-		return nil, 0, err
-	}
+	am := g.adjacency
 	for b := range am {
-		supportedOpenshiftVersions, err := g.getSupportedOpenshiftVersions(b)
-		if err != nil {
-			return nil, 0, err
-		}
-		if !supportedOpenshiftVersions.Has(toOCPVersion) {
+		if !b.supportedOpenshiftVersions.Has(toOCPVersion) {
 			continue
 		}
 		availableInTarget = append(availableInTarget, b)
@@ -164,15 +160,8 @@ func (g *upgradeGraph) mermaid(onlyShortestPaths bool) (string, error) {
 	linkCount := 0
 	linkColors := map[string][]string{}
 
-	subgraph := g.global
-	am, err := subgraph.AdjacencyMap()
-	if err != nil {
-		return "", err
-	}
-	pm, err := subgraph.PredecessorMap()
-	if err != nil {
-		return "", err
-	}
+	am := g.adjacency
+	pm := g.predecessors
 
 	vGroups := map[majorMinor][]*bundle{}
 	sortedTos := slices.SortedFunc(maps.Keys(pm), func(a *bundle, b *bundle) int {
@@ -188,8 +177,8 @@ func (g *upgradeGraph) mermaid(onlyShortestPaths bool) (string, error) {
 	})
 	for _, mm := range sortedVGroups {
 		vGroup := vGroups[mm]
-		//subgraphString := fmt.Sprintf("%s", mm)
-		//sb.WriteString(fmt.Sprintf("\n    subgraph %s[%s]\n", subgraphString, mm))
+		subgraphString := fmt.Sprintf("%s", mm)
+		sb.WriteString(fmt.Sprintf("\n  subgraph %s[%s]\n", subgraphString, mm))
 		for _, to := range vGroup {
 			sb.WriteString(fmt.Sprintf("    %s%s\n", to.String(), g.nodeClass(to, len(am[to]) == 0)))
 
@@ -203,8 +192,8 @@ func (g *upgradeGraph) mermaid(onlyShortestPaths bool) (string, error) {
 				linkCount++
 			}
 		}
-		//sb.WriteString("    end\n")
-		//sb.WriteString(fmt.Sprintf("    style %s %s\n", subgraphString, g.subgraphStyle(mm)))
+		sb.WriteString("  end\n")
+		sb.WriteString(fmt.Sprintf("  style %s %s\n", subgraphString, g.subgraphStyle(mm)))
 	}
 
 	for color, links := range linkColors {
@@ -234,12 +223,23 @@ func (g *upgradeGraph) subgraphStyle(mm majorMinor) string {
 }
 
 func (g *upgradeGraph) edgeInfo(edge graph.Edge[*bundle]) (bool, string, string) {
-	if _, ok := edge.Properties.Attributes["shortestPathToHighestVersion"]; ok {
-		return true, "===>", "green"
-	} else if _, ok := edge.Properties.Attributes["shortestPathToNonHighestHead"]; ok {
+	for to, path := range edge.Source.shortestPathTo {
+		if path[0] != edge.Target {
+			continue
+		}
+		if to == g.highestVersion {
+			return true, "===>", "green"
+		}
 		return true, "--->", "black"
 	}
 	return false, "-.->", "gray"
+	//
+	//if _, ok := edge.Properties.Attributes["shortestPathToHighestVersion"]; ok {
+	//	return true, "===>", "green"
+	//} else if _, ok := edge.Properties.Attributes["shortestPathToNonHighestHead"]; ok {
+	//	return true, "--->", "black"
+	//}
+	//return false, "-.->", "gray"
 }
 
 func (g *upgradeGraph) nodeClass(node *bundle, isHead bool) string {
@@ -251,11 +251,10 @@ func (g *upgradeGraph) nodeClass(node *bundle, isHead bool) string {
 
 func (g *upgradeGraph) initialize(tmpl template, bundles []*bundle) error {
 	gr := graph.New[*bundle, *bundle](func(a *bundle) *bundle { return a }, graph.Directed(), graph.PreventCycles())
-
 	versionsByMajorMinor := map[majorMinor]majorMinorVersion{}
 	for _, v := range tmpl.Versions {
 		slices.SortFunc(v.Targets, func(a majorMinor, b majorMinor) int {
-			return b.compare(a)
+			return a.compare(b)
 		})
 		versionsByMajorMinor[v.Version] = v
 	}
@@ -271,11 +270,11 @@ func (g *upgradeGraph) initialize(tmpl template, bundles []*bundle) error {
 			errs = append(errs, fmt.Errorf("invalid template: bundle image %s is in version %d.%d, but that version is not listed in the template versions", b.Reference.String(), b.Version.Major, b.Version.Minor))
 			continue
 		}
-		supportedOpenshiftVersions := []string{}
-		for _, tgt := range v.Targets {
-			supportedOpenshiftVersions = append(supportedOpenshiftVersions, tgt.String())
-		}
-		if err := gr.AddVertex(b, graph.VertexAttribute("supportedOpenshiftVersions", strings.Join(supportedOpenshiftVersions, "|"))); err != nil {
+		b.supportedOpenshiftVersions = sets.New[majorMinor](v.Targets...)
+		b.maxOpenShiftVersion = v.Targets[len(v.Targets)-1]
+		b.lifecycleDates = v.LifecycleDates
+
+		if err := gr.AddVertex(b); err != nil {
 			return fmt.Errorf("error adding bundle %q to graph: %v", b.String(), err)
 		}
 
@@ -325,28 +324,34 @@ func (g *upgradeGraph) initialize(tmpl template, bundles []*bundle) error {
 		}
 	}
 
+	am, err = gr.AdjacencyMap()
+	if err != nil {
+		return err
+	}
 	for _, from := range sortedFroms {
+		shortestPathsTo := map[*bundle][]*bundle{}
 		for _, to := range heads.UnsortedList() {
 			if heads.Has(from) {
 				continue
 			}
-			sp, _, err := shortestPath(gr, from, to)
+			sp, _, err := shortestPath(am, from, to)
 			if err != nil {
 				continue
 			}
-			opts := []func(*graph.EdgeProperties){}
-			if to == highestVersion {
-				opts = append(opts, graph.EdgeAttribute("shortestPathToHighestVersion", "true"))
-			} else {
-				opts = append(opts, graph.EdgeAttribute("shortestPathToNonHighestHead", "true"))
-			}
-			if err := gr.UpdateEdge(sp[0], sp[1], opts...); err != nil {
-				return err
-			}
+			shortestPathsTo[to] = sp[1:]
 		}
+		from.shortestPathTo = shortestPathsTo
+	}
+
+	pm, err := gr.PredecessorMap()
+	if err != nil {
+		return err
 	}
 
 	g.global = gr
+	g.highestVersion = highestVersion
+	g.adjacency = am
+	g.predecessors = pm
 	return nil
 }
 
@@ -411,18 +416,6 @@ func (mmv *majorMinorVersion) lifecycleState(asOf time.Time) string {
 		}
 	}
 	return fmt.Sprintf("eus-%d", len(mmv.LifecycleDates.Extensions))
-}
-
-func (mmv *majorMinorVersion) matchesVersion(v semver.Version) bool {
-	return mmv.Version.includes(v)
-}
-
-func (mmv *majorMinorVersion) updatesFromVersion(v semver.Version) bool {
-	// versions with a different major version are never update sources
-	if mmv.Version.Major != v.Major {
-		return false
-	}
-	return v.GTE(mmv.MinUpgradeVersion) && v.Minor <= mmv.Version.Minor
 }
 
 type date struct {
@@ -557,6 +550,11 @@ type bundle struct {
 	Release     *string
 	Reference   reference.Canonical
 	BuiltAt     time.Time
+
+	maxOpenShiftVersion        majorMinor
+	supportedOpenshiftVersions sets.Set[majorMinor]
+	lifecycleDates             lifecycleDates
+	shortestPathTo             map[*bundle][]*bundle
 }
 
 func (b bundle) String() string {
@@ -644,14 +642,12 @@ func validateSamePackage(bundles []*bundle) error {
 	return nil
 }
 
-func shortestPath(gr graph.Graph[*bundle, *bundle], from *bundle, to *bundle) ([]*bundle, float64, error) {
-	am, err := gr.AdjacencyMap()
-	if err != nil {
-		return nil, math.Inf(1), err
-	}
+func shortestPath(adjacencyMap map[*bundle]map[*bundle]graph.Edge[*bundle], from *bundle, to *bundle) ([]*bundle, float64, error) {
+	// NOTE: the graph.ShortestPath function seems broken, at least for graphs that we might build.
+	// So for now, we use gonum/graph and gonum/graph/path to compute shortest paths.
 	wg := simple.NewWeightedDirectedGraph(0, math.Inf(1))
-	for a := range am {
-		for b, e := range am[a] {
+	for a := range adjacencyMap {
+		for b, e := range adjacencyMap[a] {
 			wg.SetWeightedEdge(simple.WeightedEdge{
 				F: a,
 				T: b,
@@ -672,5 +668,5 @@ func shortestPath(gr graph.Graph[*bundle, *bundle], from *bundle, to *bundle) ([
 }
 
 func (ug *upgradeGraph) shortestPath(from *bundle, to *bundle) ([]*bundle, float64, error) {
-	return shortestPath(ug.global, from, to)
+	return shortestPath(ug.adjacency, from, to)
 }
