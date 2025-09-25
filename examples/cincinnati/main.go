@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"iter"
 	"log"
 	"maps"
 	"math"
@@ -22,6 +23,7 @@ import (
 	"github.com/blang/semver/v4"
 	"github.com/dominikbraun/graph"
 	"github.com/joelanford/extensiondb/internal/db"
+	"github.com/lucasb-eyer/go-colorful"
 	"go.podman.io/image/v5/docker/reference"
 	"gonum.org/v1/gonum/graph/path"
 	"gonum.org/v1/gonum/graph/simple"
@@ -64,11 +66,34 @@ func main() {
 		log.Fatal(err)
 	}
 
-	m, err := g.mermaid(true)
+	now := time.Now()
+	m, err := g.mermaid(mermaidConfig{
+		IgnoreNode: func(b *bundle) bool {
+			return false
+		},
+		IgnoreEdge: func(from *bundle, to *bundle, w int) bool {
+			for head, sp := range from.shortestPathTo {
+				if head.lifecycleDates.lifecycleState(now) != lifecycleStateFullSupport {
+					continue
+				}
+				if sp[0] == to {
+					return false
+				}
+			}
+			return w > 3
+		},
+		NodeTextFn: func(n *bundle) string {
+			return n.String()
+		},
+		NodeStyle: defaultNodeStyle(now),
+		EdgeStyle: defaultEdgeStyle(now),
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(m)
+	if err := os.WriteFile("./examples/cincinnati/graph.mmd", []byte(m), 0644); err != nil {
+		log.Fatal(err)
+	}
 
 	sp, weight, err := g.preferredPathToOCPVersion(bs[0], majorMinor{4, 19}, preferenceHighestVersion())
 	if err != nil {
@@ -86,28 +111,11 @@ func main() {
 
 type upgradeGraph struct {
 	global          graph.Graph[*bundle, *bundle]
-	lifecycleStates map[majorMinor]string
+	lifecycleStates map[majorMinor]lifecycleState
+	asOf            time.Time
 	highestVersion  *bundle
 	adjacency       map[*bundle]map[*bundle]graph.Edge[*bundle]
 	predecessors    map[*bundle]map[*bundle]graph.Edge[*bundle]
-}
-
-func (g *upgradeGraph) getSupportedOpenshiftVersions(b *bundle) (sets.Set[majorMinor], error) {
-	_, props, err := g.global.VertexWithProperties(b)
-	if err != nil {
-		return nil, err
-	}
-	propStr := props.Attributes["supportedOpenshiftVersions"]
-	supportedOpenshiftVersionsStrs := strings.Split(propStr, "|")
-	supportedOpenshiftVersions := sets.New[majorMinor]()
-	for _, str := range supportedOpenshiftVersionsStrs {
-		mm, err := newMajorMinorFromString(str)
-		if err != nil {
-			return nil, err
-		}
-		supportedOpenshiftVersions.Insert(mm)
-	}
-	return supportedOpenshiftVersions, nil
 }
 
 func preferenceHighestVersion() func(*bundle, *bundle) int {
@@ -140,113 +148,170 @@ func (g *upgradeGraph) preferredPathToOCPVersion(from *bundle, toOCPVersion majo
 	return nil, 0, graph.ErrTargetNotReachable
 }
 
-func (g *upgradeGraph) mermaid(onlyShortestPaths bool) (string, error) {
+type mermaidConfig struct {
+	IgnoreNode func(*bundle) bool
+	IgnoreEdge func(*bundle, *bundle, int) bool
+
+	NodeTextFn func(*bundle) string
+	NodeStyle  func(*bundle) string
+
+	EdgeStyle func(*bundle, *bundle, int) string
+}
+
+func defaultMermaidConfig(m *mermaidConfig, asOf time.Time) {
+	if m == nil {
+		m = &mermaidConfig{}
+	}
+	if m.IgnoreNode == nil {
+		m.IgnoreNode = func(_ *bundle) bool { return false }
+	}
+	if m.IgnoreEdge == nil {
+		m.IgnoreEdge = func(_ *bundle, _ *bundle, _ int) bool { return false }
+	}
+	if m.NodeTextFn == nil {
+		m.NodeTextFn = func(b *bundle) string { return b.String() }
+	}
+	if m.NodeStyle == nil {
+		m.NodeStyle = defaultNodeStyle(asOf)
+	}
+	if m.EdgeStyle == nil {
+		m.EdgeStyle = defaultEdgeStyle(asOf)
+	}
+}
+
+func defaultNodeStyle(asOf time.Time) func(node *bundle) string {
+	return func(node *bundle) string {
+		hasPathToFullSupport := false
+		for head := range node.shortestPathTo {
+			if head.lifecycleDates.lifecycleState(asOf) != lifecycleStateFullSupport {
+				continue
+			}
+			hasPathToFullSupport = true
+			break
+		}
+
+		warningStyle := ""
+		if !hasPathToFullSupport {
+			warningStyle = ",stroke:#ff0000,stroke-width:3px"
+		}
+
+		lfs := node.lifecycleDates.lifecycleState(asOf)
+		fillColor := colorForLifecycleState(lfs)
+		textColor := colorful.LinearRgb(0, 0, 0)
+		fh, fs, fl := fillColor.Hsl()
+		fl *= .9
+		isHead := len(node.shortestPathTo) == 0
+		if isHead {
+			fl = 1 - fl
+			textColor = colorful.LinearRgb(.95, .95, .95)
+		}
+		return fmt.Sprintf("fill:%s,color:%s%s", colorful.Hsl(fh, fs, fl).Hex(), textColor.Hex(), warningStyle)
+	}
+}
+
+func defaultEdgeStyle(asOf time.Time) func(from *bundle, to *bundle, _ int) string {
+	return func(from *bundle, to *bundle, _ int) string {
+		var highestHead *bundle
+		for head := range from.shortestPathTo {
+			if highestHead == nil || head.compare(highestHead) > 0 {
+				highestHead = head
+			}
+		}
+		for head, sp := range orderedMap(from.shortestPathTo, func(a, b *bundle) int { return b.compare(a) }) {
+			if sp[0] != to {
+				continue
+			}
+			headLFS := head.lifecycleDates.lifecycleState(asOf)
+			headColor := colorForLifecycleState(headLFS)
+			h, _, _ := headColor.Hsl()
+			headColor = colorful.Hsl(h, 1, .3)
+			return fmt.Sprintf("stroke:%s,stroke-width:2px", headColor.Hex())
+		}
+		return "stroke:gray,fill:none,stroke-width:0.5px,stroke-dasharray:4;"
+	}
+}
+
+func colorForLifecycleState(lfs lifecycleState) colorful.Color {
+	switch lfs {
+	case lifecycleStatePreGA:
+		return colorful.LinearRgb(1, 1, 1)
+	case lifecycleStateFullSupport:
+		return colorful.Hsl(100, 1, .9)
+	case lifecycleStateMaintenance:
+		return colorful.Hsl(60, 1, .9)
+	case lifecycleStateEndOfLife:
+		return colorful.Hsl(360, 1, .9)
+	case 2:
+		return colorful.Hsl(170, 1, .9)
+	case 3:
+		return colorful.Hsl(240, 1, .9)
+	}
+	panic("unknown lifecycleState: " + lfs.String())
+}
+
+func (g *upgradeGraph) mermaid(conf mermaidConfig) (string, error) {
+	defaultMermaidConfig(&conf, g.asOf)
+
 	var sb strings.Builder
 
-	sb.WriteString("flowchart\n")
+	sb.WriteString("graph LR\n")
 
-	sb.WriteString("  classDef green fill:#cfc,stroke:#333,stroke-width:4px;\n")
-	sb.WriteString("  classDef yellow fill:#ffc,stroke:#333,stroke-width:4px;\n")
-	sb.WriteString("  classDef orange fill:#fdb,stroke:#333,stroke-width:4px;\n")
-	sb.WriteString("  classDef red fill:#fcc,stroke:#333,stroke-width:4px;\n\n")
-
-	sb.WriteString("  classDef darkgreen fill:#070,color:#fff,stroke:#333,stroke-width:4px;\n")
-	sb.WriteString("  classDef darkyellow fill:#770,color:#fff,stroke:#333,stroke-width:4px;\n")
-	sb.WriteString("  classDef darkorange fill:#b50,color:#fff,stroke:#333,stroke-width:4px;\n")
-	sb.WriteString("  classDef darkred fill:#b00,color:#fff,stroke:#333,stroke-width:4px;\n\n")
-
-	sb.WriteString("  classDef head fill:#cfc,color:#000,stroke:#333,stroke-width:4px;\n\n")
-
-	linkCount := 0
-	linkColors := map[string][]string{}
-
-	am := g.adjacency
 	pm := g.predecessors
 
-	vGroups := map[majorMinor][]*bundle{}
-	sortedTos := slices.SortedFunc(maps.Keys(pm), func(a *bundle, b *bundle) int {
-		return a.compare(b)
-	})
-	for _, b := range sortedTos {
+	bundleMinorVersions := map[majorMinor][]*bundle{}
+	for b := range orderedMap(pm, compareBundles) {
+		if conf.IgnoreNode(b) {
+			continue
+		}
 		mm := majorMinor{Major: b.Version.Major, Minor: b.Version.Minor}
-		vGroups[mm] = append(vGroups[mm], b)
+		bundleMinorVersions[mm] = append(bundleMinorVersions[mm], b)
 	}
 
-	sortedVGroups := slices.SortedFunc(maps.Keys(vGroups), func(a, b majorMinor) int {
-		return a.compare(b)
-	})
-	for _, mm := range sortedVGroups {
-		vGroup := vGroups[mm]
-		subgraphString := fmt.Sprintf("%s", mm)
-		sb.WriteString(fmt.Sprintf("\n  subgraph %s[%s]\n", subgraphString, mm))
-		for _, to := range vGroup {
-			sb.WriteString(fmt.Sprintf("    %s%s\n", to.String(), g.nodeClass(to, len(am[to]) == 0)))
+	nodeClasses := map[string]string{}
+	edgeCount := 0
+	edgeStyles := map[string][]string{}
 
-			for from, e := range pm[to] {
-				sp, style, color := g.edgeInfo(e)
-				if !sp && onlyShortestPaths {
+	for mm, vGroup := range orderedMap(bundleMinorVersions, compareMajorMinors) {
+		subgraphString := fmt.Sprintf("%s", mm)
+		sb.WriteString(fmt.Sprintf("\n  subgraph %s[\"%s (%s)\"]\n", subgraphString, mm, g.lifecycleStates[mm]))
+		for _, to := range vGroup {
+			style := conf.NodeStyle(to)
+			class := "default"
+			if style != "" {
+				class = fmt.Sprintf("c%x", hashString(style))
+				nodeClasses[class] = style
+			}
+			sb.WriteString(fmt.Sprintf("    %s:::%s\n", to.String(), class))
+
+			for from, e := range orderedMap(pm[to], compareBundles) {
+				if conf.IgnoreNode(from) || conf.IgnoreEdge(from, to, e.Properties.Weight) {
 					continue
 				}
-				linkColors[color] = append(linkColors[color], strconv.Itoa(linkCount))
-				sb.WriteString(fmt.Sprintf("    %s %s %s\n", from.String(), style, to.String()))
-				linkCount++
+
+				edgeStyle := conf.EdgeStyle(from, to, e.Properties.Weight)
+				edgeStyles[edgeStyle] = append(edgeStyles[edgeStyle], strconv.Itoa(edgeCount))
+				sb.WriteString(fmt.Sprintf("    %s --> %s\n", conf.NodeTextFn(from), conf.NodeTextFn(to)))
+				edgeCount++
 			}
 		}
 		sb.WriteString("  end\n")
 		sb.WriteString(fmt.Sprintf("  style %s %s\n", subgraphString, g.subgraphStyle(mm)))
 	}
 
-	for color, links := range linkColors {
-		sb.WriteString(fmt.Sprintf("  linkStyle %s stroke:%s;\n", strings.Join(links, ","), color))
+	for class, style := range orderedMap(nodeClasses, cmp.Compare) {
+		sb.WriteString(fmt.Sprintf("  classDef %s %s;\n", class, style))
+	}
+
+	for style, edges := range orderedMap(edgeStyles, cmp.Compare) {
+		sb.WriteString(fmt.Sprintf("  linkStyle %s %s;\n", strings.Join(edges, ","), style))
 	}
 
 	return sb.String(), nil
 }
 
 func (g *upgradeGraph) subgraphStyle(mm majorMinor) string {
-	lf := g.lifecycleStates[mm]
-	switch lf {
-	case "pre-ga":
-		return "fill:#fff"
-	case "full-support":
-		return "fill:#cfc"
-	case "maintenance":
-		return "fill:#ffc"
-	case "eus-1":
-		return "fill:#fdb"
-	case "eus-2":
-		return "fill:#fdb"
-	case "end-of-life":
-		return "fill:#fcc"
-	}
-	panic("unknown lifecycleState: " + lf)
-}
-
-func (g *upgradeGraph) edgeInfo(edge graph.Edge[*bundle]) (bool, string, string) {
-	for to, path := range edge.Source.shortestPathTo {
-		if path[0] != edge.Target {
-			continue
-		}
-		if to == g.highestVersion {
-			return true, "===>", "green"
-		}
-		return true, "--->", "black"
-	}
-	return false, "-.->", "gray"
-	//
-	//if _, ok := edge.Properties.Attributes["shortestPathToHighestVersion"]; ok {
-	//	return true, "===>", "green"
-	//} else if _, ok := edge.Properties.Attributes["shortestPathToNonHighestHead"]; ok {
-	//	return true, "--->", "black"
-	//}
-	//return false, "-.->", "gray"
-}
-
-func (g *upgradeGraph) nodeClass(node *bundle, isHead bool) string {
-	if isHead {
-		return ":::head"
-	}
-	return ""
+	lfs := g.lifecycleStates[mm]
+	return fmt.Sprintf("fill:%s", colorForLifecycleState(lfs).Hex())
 }
 
 func (g *upgradeGraph) initialize(tmpl template, bundles []*bundle) error {
@@ -279,6 +344,13 @@ func (g *upgradeGraph) initialize(tmpl template, bundles []*bundle) error {
 		}
 
 		for _, a := range seen {
+			fromLifecycleState := a.lifecycleDates.lifecycleState(g.asOf)
+			toLifecycleState := b.lifecycleDates.lifecycleState(g.asOf)
+
+			// Don't upgrade into a "worse" lifecycle state
+			if fromLifecycleState < toLifecycleState {
+				continue
+			}
 			if a.Version.LT(b.Version) && a.Version.GTE(v.MinUpgradeVersion) {
 				if err := gr.AddEdge(a, b); err != nil {
 					return fmt.Errorf("error adding edge %s -> %s to graph: %v", a.String(), b.String(), err)
@@ -309,18 +381,18 @@ func (g *upgradeGraph) initialize(tmpl template, bundles []*bundle) error {
 		}
 	}
 
-	sortedFroms := slices.SortedFunc(maps.Keys(am), func(a *bundle, b *bundle) int {
-		return a.compare(b)
-	})
-
-	for _, from := range sortedFroms {
-		sortedTos := slices.SortedFunc(maps.Keys(am[from]), func(a *bundle, b *bundle) int {
-			return b.compare(a)
-		})
-		for i, to := range sortedTos {
-			if err := gr.UpdateEdge(from, to, graph.EdgeWeight(i+1)); err != nil {
+	for from, tos := range orderedMap(am, compareBundles) {
+		count := 1
+		for to := range orderedMap(tos, func(a, b *bundle) int { return b.compare(a) }) {
+			weight := count
+			toLifecycleState := to.lifecycleDates.lifecycleState(g.asOf)
+			if toLifecycleState == lifecycleStateEndOfLife {
+				weight = count + 100000
+			}
+			if err := gr.UpdateEdge(from, to, graph.EdgeWeight(weight)); err != nil {
 				return err
 			}
+			count++
 		}
 	}
 
@@ -328,7 +400,7 @@ func (g *upgradeGraph) initialize(tmpl template, bundles []*bundle) error {
 	if err != nil {
 		return err
 	}
-	for _, from := range sortedFroms {
+	for from := range orderedMap(am, compareBundles) {
 		shortestPathsTo := map[*bundle][]*bundle{}
 		for _, to := range heads.UnsortedList() {
 			if heads.Has(from) {
@@ -358,16 +430,15 @@ func (g *upgradeGraph) initialize(tmpl template, bundles []*bundle) error {
 func newGraph(tmpl template, bundles []*bundle) (*upgradeGraph, error) {
 	ug := &upgradeGraph{
 		global:          graph.New[*bundle, *bundle](func(a *bundle) *bundle { return a }, graph.Directed(), graph.PreventCycles()),
-		lifecycleStates: map[majorMinor]string{},
+		asOf:            time.Now(),
+		lifecycleStates: map[majorMinor]lifecycleState{},
 	}
-
 	if err := ug.initialize(tmpl, bundles); err != nil {
 		return nil, fmt.Errorf("error initializing graph: %v", err)
 	}
 
-	now := time.Now()
 	for _, mmv := range tmpl.Versions {
-		ug.lifecycleStates[mmv.Version] = mmv.lifecycleState(now)
+		ug.lifecycleStates[mmv.Version] = mmv.LifecycleDates.lifecycleState(ug.asOf)
 	}
 
 	return ug, nil
@@ -396,26 +467,53 @@ type majorMinorVersion struct {
 	Targets           []majorMinor   `json:"targets"`
 }
 
-func (mmv *majorMinorVersion) lifecycleState(asOf time.Time) string {
-	if asOf.Before(mmv.LifecycleDates.GA.Time) {
-		return "pre-ga"
+func (ld lifecycleDates) lifecycleState(asOf time.Time) lifecycleState {
+	if asOf.Before(ld.GA.Time) {
+		return lifecycleStatePreGA
 	}
-	if asOf.Before(mmv.LifecycleDates.Maintenance.Time) {
-		return "full-support"
+	if asOf.Before(ld.Maintenance.Time) {
+		return lifecycleStateFullSupport
 	}
-	if asOf.After(mmv.LifecycleDates.EndOfLife.Time) {
-		return "end-of-life"
+	if asOf.After(ld.EndOfLife.Time) {
+		return lifecycleStateEndOfLife
 	}
 
-	if len(mmv.LifecycleDates.Extensions) == 0 || asOf.Before(mmv.LifecycleDates.Extensions[0].Time) {
-		return "maintenance"
+	if len(ld.Extensions) == 0 || asOf.Before(ld.Extensions[0].Time) {
+		return lifecycleStateMaintenance
 	}
-	for i, ext := range mmv.LifecycleDates.Extensions[1:] {
+	for i, ext := range ld.Extensions[1:] {
 		if asOf.Before(ext.Time) {
-			return fmt.Sprintf("eus-%d", i+1)
+			return lifecycleState(i + 2)
 		}
 	}
-	return fmt.Sprintf("eus-%d", len(mmv.LifecycleDates.Extensions))
+	return lifecycleState(len(ld.Extensions) + 1)
+}
+
+type lifecycleState int
+
+const (
+	lifecycleStatePreGA       lifecycleState = -1
+	lifecycleStateFullSupport lifecycleState = 0
+	lifecycleStateMaintenance lifecycleState = 1
+	lifecycleStateEndOfLife                  = math.MaxInt
+)
+
+func (ls lifecycleState) String() string {
+	if ls < -1 {
+		panic("invalid lifecycle state")
+	}
+	switch ls {
+	case lifecycleStatePreGA:
+		return "Pre-GA"
+	case lifecycleStateFullSupport:
+		return "Full Support"
+	case lifecycleStateMaintenance:
+		return "Maintenance"
+	case lifecycleStateEndOfLife:
+		return "End-of-Life"
+	default:
+		return fmt.Sprintf("EUS-%d", ls-1)
+	}
 }
 
 type date struct {
@@ -472,10 +570,6 @@ func (v majorMinor) String() string {
 
 func (v majorMinor) MarshalJSON() ([]byte, error) {
 	return json.Marshal(v.String())
-}
-
-func (mm majorMinor) includes(v semver.Version) bool {
-	return v.Major == mm.Major && v.Minor == mm.Minor
 }
 
 func (mm majorMinor) compare(other majorMinor) int {
@@ -565,10 +659,14 @@ func (b bundle) String() string {
 	return id
 }
 
-func (b bundle) ID() int64 {
+func hashString(s string) uint64 {
 	h := fnv.New64a()
-	h.Write([]byte(b.String()))
-	return int64(h.Sum64())
+	h.Write([]byte(s))
+	return h.Sum64()
+}
+
+func (b bundle) ID() int64 {
+	return int64(hashString(b.String()))
 }
 
 func (b *bundle) compare(other *bundle) int {
@@ -669,4 +767,24 @@ func shortestPath(adjacencyMap map[*bundle]map[*bundle]graph.Edge[*bundle], from
 
 func (ug *upgradeGraph) shortestPath(from *bundle, to *bundle) ([]*bundle, float64, error) {
 	return shortestPath(ug.adjacency, from, to)
+}
+
+func orderedMap[K comparable, V any](m map[K]V, cmp func(a, b K) int) iter.Seq2[K, V] {
+	return func(yield func(K, V) bool) {
+		orderedKeys := slices.SortedFunc(maps.Keys(m), cmp)
+		for _, k := range orderedKeys {
+			v := m[k]
+			if !yield(k, v) {
+				return
+			}
+		}
+	}
+}
+
+func compareBundles(a, b *bundle) int {
+	return a.compare(b)
+}
+
+func compareMajorMinors(a, b majorMinor) int {
+	return a.compare(b)
 }

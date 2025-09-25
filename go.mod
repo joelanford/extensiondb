@@ -11,6 +11,7 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.18.3
 	github.com/joelanford/imageutil v0.0.0-20250908121429-ad1dc3737eba
 	github.com/lib/pq v1.10.9
+	github.com/lucasb-eyer/go-colorful v1.3.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/operator-framework/api v0.34.0

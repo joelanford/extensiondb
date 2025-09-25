@@ -189,3 +189,9 @@ images:
   - registry.redhat.io/quay/quay-operator-bundle@sha256:3694b45af16019f667d19f8275d5edc9fcde4809131dd732a89e7f17e5012174
   - registry.redhat.io/quay/quay-operator-bundle@sha256:bc579e916a49be8a4faeae6aaa2a6b7f127c4cc1ee8e5d51c73a645969bbbd0f
   - registry.redhat.io/quay/quay-operator-bundle@sha256:5cd75224430fa323017374453a30ec5f2a57c0191a5deb4d17a36736ccdec28d
+
+  - registry.redhat.io/quay/quay-operator-bundle@sha256:ed97b11fa0f0f7aadf193810a5a599bf26015a0af8ee6fd90061110dcb0d50f4
+  - registry.redhat.io/quay/quay-operator-bundle@sha256:f16c0a135dd7380e2a489f963b38bd76a63a973f482d06ece8d3656aff223703
+  - registry.redhat.io/quay/quay-operator-bundle@sha256:9d0ed6d279800a189c1466e0b32f80af2f8bad96a65b7dc0322c64337dddf39c
+  - registry.redhat.io/quay/quay-operator-bundle@sha256:b499eebed32c0261db414e307f96f8aef9e743035544c80c048526e7ba4fbdc2
+  - registry.redhat.io/quay/quay-operator-bundle@sha256:28e37ec35de1307405264cd4f79aaa6ce4d4ecbd6cbc27f4fef5db415c678d64
