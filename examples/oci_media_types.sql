@@ -28,10 +28,14 @@ SELECT
     c.tag AS catalog_tag,
     p.name AS package_name,
     b.version,
+    (br.repo || '@' || br.digest) as ref,
+    (b.image -> 'config' -> 'Labels' -> 'maintainer') as maintainer,
     (b.descriptor ->> 'mediaType') AS media_type
 FROM bundles AS b
 JOIN bundle_reference_bundles AS brb
     ON b.id = brb.bundle_id
+JOIN bundle_references AS br
+    ON br.id = brb.bundle_reference_id
 JOIN catalog_digest_bundle_references AS cdrb
     ON brb.bundle_reference_id = cdrb.bundle_reference_id
 JOIN newest_catalog_digests AS cd
@@ -42,12 +46,16 @@ JOIN packages AS p
     ON p.id = b.package_id;
 
 SELECT
-    package_name,
-    version,
-    media_type,
-    catalog_name,
-    STRING_AGG(catalog_tag, ', ' ORDER BY catalog_tag) as catalog_tags
-FROM bundle_builds WHERE media_type != 'application/vnd.docker.distribution.manifest.v2+json' GROUP BY package_name, version, media_type, catalog_name ORDER BY package_name, version;
+    json_build_object(
+        'name',        package_name,
+        'version',     version,
+        'ref',         ref,
+        'maintainer',  maintainer,
+        'mediaType',   media_type,
+        'catalogName', catalog_name,
+        'catalogTags', STRING_AGG(catalog_tag, ', ' ORDER BY catalog_tag)
+    )
+FROM bundle_builds WHERE media_type ~ 'oci' GROUP BY package_name, version, ref, maintainer, media_type, catalog_name ORDER BY package_name, version;
 
 DROP VIEW bundle_builds;
 DROP VIEW newest_catalog_digests;

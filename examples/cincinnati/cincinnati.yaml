@@ -1,6 +1,5 @@
 schema: olm.cincinnati
-
-versions:
+versionStreams:
   - version: "3.7"
     lifecycleDates:
       ga: 2022-05-23
@@ -8,8 +7,8 @@ versions:
       extensions:
         - 2023-08-14
       eol: 2023-11-28
-    minUpgradeVersion: "3.4.0"
-    targets: [ "4.6", "4.7", "4.8", "4.9", "4.10", "4.11", "4.12", "4.13" ]
+    minimumUpdateVersion: "3.4.0"
+    supportedPlatformVersions: [ "4.6", "4.7", "4.8", "4.9", "4.10", "4.11", "4.12", "4.13" ]
   - version: "3.8"
     lifecycleDates:
       ga: 2022-12-06
@@ -17,8 +16,8 @@ versions:
       extensions:
        - 2023-11-17
       eol: 2024-02-16
-    minUpgradeVersion: "3.5.0"
-    targets: ["4.8", "4.9", "4.10", "4.11", "4.12", "4.13"]
+    minimumUpdateVersion: "3.5.0"
+    supportedPlatformVersions: ["4.8", "4.9", "4.10", "4.11", "4.12", "4.13"]
   - version: "3.9"
     lifecycleDates:
       ga: 2023-08-14
@@ -27,8 +26,8 @@ versions:
         - 2024-06-17
         - 2025-01-17
       eol: 2026-01-17
-    minUpgradeVersion: "3.6.0"
-    targets: ["4.10", "4.11", "4.12", "4.13"]
+    minimumUpdateVersion: "3.6.0"
+    supportedPlatformVersions: ["4.10", "4.11", "4.12", "4.13"]
   - version: "3.10"
     lifecycleDates:
       ga: 2023-11-28
@@ -37,15 +36,15 @@ versions:
         - 2025-05-01
         - 2025-10-31
       eol: 2026-10-31
-    minUpgradeVersion: "3.7.0"
-    targets: ["4.11", "4.12", "4.13", "4.14"]
+    minimumUpdateVersion: "3.7.0"
+    supportedPlatformVersions: ["4.11", "4.12", "4.13", "4.14"]
   - version: "3.11"
     lifecycleDates:
       ga: 2024-04-02
       maintenance: 2024-09-27
       eol: 2025-08-27
-    minUpgradeVersion: "3.8.0"
-    targets: ["4.12", "4.13", "4.14", "4.15"]
+    minimumUpdateVersion: "3.8.0"
+    supportedPlatformVersions: ["4.12", "4.13", "4.14", "4.15"]
   - version: "3.12"
     lifecycleDates:
       ga: 2024-07-23
@@ -54,15 +53,15 @@ versions:
         - 2025-12-27
         - 2026-06-27
       eol: 2027-06-27
-    minUpgradeVersion: "3.9.0"
-    targets: ["4.12", "4.14", "4.15", "4.16"]
+    minimumUpdateVersion: "3.9.0"
+    supportedPlatformVersions: ["4.12", "4.14", "4.15", "4.16"]
   - version: "3.13"
     lifecycleDates:
       ga: 2024-10-30
       maintenance: 2025-05-25
       eol: 2026-04-01
-    minUpgradeVersion: "3.10.0"
-    targets: ["4.12", "4.14", "4.15", "4.16", "4.17"]
+    minimumUpdateVersion: "3.10.0"
+    supportedPlatformVersions: ["4.12", "4.14", "4.15", "4.16", "4.17"]
   - version: "3.14"
     lifecycleDates:
       ga: 2025-04-02
@@ -71,15 +70,15 @@ versions:
         - 2026-08-25
         - 2027-02-25
       eol: 2028-02-25
-    minUpgradeVersion: "3.11.0"
-    targets: ["4.12", "4.14", "4.15", "4.16", "4.17", "4.18"]
+    minimumUpdateVersion: "3.11.0"
+    supportedPlatformVersions: ["4.12", "4.14", "4.15", "4.16", "4.17", "4.18"]
   - version: "3.15"
     lifecycleDates:
       ga: 2025-07-07
       maintenance: 2026-01-21
       eol: 2026-12-17
-    minUpgradeVersion: "3.12.0"
-    targets: ["4.12", "4.14", "4.15", "4.16", "4.17", "4.18", "4.19"]
+    minimumUpdateVersion: "3.12.0"
+    supportedPlatformVersions: ["4.12", "4.14", "4.15", "4.16", "4.17", "4.18", "4.19"]
 
 images:
   #- registry.redhat.io/quay/quay-operator-bundle@sha256:722cf3c05eb5663a737cb1385b971b6d1f0c8b2595d5ac425f7b100c25e2fd26
