@@ -7,20 +7,20 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/joelanford/extensiondb/examples/cincinnati/pkg/types"
+	"github.com/joelanford/extensiondb/examples/cincinnati/pkg/graph"
 	"github.com/joelanford/extensiondb/examples/cincinnati/pkg/util"
 	"github.com/lucasb-eyer/go-colorful"
-	"gonum.org/v1/gonum/graph"
+	ggraph "gonum.org/v1/gonum/graph"
 )
 
 type MermaidConfig struct {
-	KeepNode types.NodePredicate
-	KeepEdge types.EdgePredicate
+	KeepNode graph.NodePredicate
+	KeepEdge graph.EdgePredicate
 
-	NodeText  func(*types.Graph, *types.Node) string
-	NodeStyle func(*types.Graph, *types.Node) string
+	NodeText  func(*graph.Graph, *graph.Node) string
+	NodeStyle func(*graph.Graph, *graph.Node) string
 
-	EdgeStyle func(*types.Graph, *types.Node, *types.Node, float64) string
+	EdgeStyle func(*graph.Graph, *graph.Node, *graph.Node, float64) string
 }
 
 func defaultMermaidConfig(m *MermaidConfig) {
@@ -28,13 +28,13 @@ func defaultMermaidConfig(m *MermaidConfig) {
 		m = &MermaidConfig{}
 	}
 	if m.KeepNode == nil {
-		m.KeepNode = types.AllNodes()
+		m.KeepNode = graph.AllNodes()
 	}
 	if m.KeepEdge == nil {
-		m.KeepEdge = types.AllEdges()
+		m.KeepEdge = graph.AllEdges()
 	}
 	if m.NodeText == nil {
-		m.NodeText = func(_ *types.Graph, n *types.Node) string {
+		m.NodeText = func(_ *graph.Graph, n *graph.Node) string {
 			return n.VR()
 		}
 	}
@@ -47,10 +47,10 @@ func defaultMermaidConfig(m *MermaidConfig) {
 	}
 }
 
-func defaultNodeStyle() func(*types.Graph, *types.Node) string {
-	return func(g *types.Graph, node *types.Node) string {
-		fullSupportNodes := g.NodesMatching(func(_ *types.Graph, n *types.Node) bool {
-			return n.LifecyclePhase == types.LifecyclePhaseFullSupport
+func defaultNodeStyle() func(*graph.Graph, *graph.Node) string {
+	return func(g *graph.Graph, node *graph.Node) string {
+		fullSupportNodes := g.NodesMatching(func(_ *graph.Graph, n *graph.Node) bool {
+			return n.LifecyclePhase == graph.LifecyclePhaseFullSupport
 		})
 
 		hasPathToFullSupport := false
@@ -81,19 +81,22 @@ func defaultNodeStyle() func(*types.Graph, *types.Node) string {
 	}
 }
 
-func defaultEdgeStyle() func(*types.Graph, *types.Node, *types.Node, float64) string {
-	return func(g *types.Graph, from *types.Node, to *types.Node, _ float64) string {
-		shortestPathTo := map[*types.Node][]graph.Node{}
+func defaultEdgeStyle() func(*graph.Graph, *graph.Node, *graph.Node, float64) string {
+	return func(g *graph.Graph, from *graph.Node, to *graph.Node, _ float64) string {
+		shortestPathTo := map[*graph.Node][]*graph.Node{}
 		for head := range g.Heads() {
 			sp, _, _ := g.Paths().Between(from.ID(), head.ID())
 			if len(sp) == 0 {
 				continue
 			}
-			shortestPathTo[head] = sp[1:]
+			shortestPathTo[head] = util.MapSlice(sp[1:], func(i ggraph.Node) *graph.Node {
+				n := i.(*graph.Node)
+				return n
+			})
 		}
 
-		for head, sp := range util.OrderedMap(shortestPathTo, func(a, b *types.Node) int { return b.Compare(a) }) {
-			nextHop := sp[0].(*types.Node)
+		for head, sp := range util.OrderedMap(shortestPathTo, func(a, b *graph.Node) int { return b.Compare(a) }) {
+			nextHop := sp[0]
 			if nextHop != to {
 				continue
 			}
@@ -106,19 +109,19 @@ func defaultEdgeStyle() func(*types.Graph, *types.Node, *types.Node, float64) st
 	}
 }
 
-func Mermaid(g *types.Graph, cfg MermaidConfig) string {
+func Mermaid(g *graph.Graph, cfg MermaidConfig) string {
 	defaultMermaidConfig(&cfg)
 
 	var sb strings.Builder
 	sb.WriteString("graph LR\n")
 
-	bundleMinorVersions := map[types.MajorMinor][]*types.Node{}
+	bundleMinorVersions := map[graph.MajorMinor][]*graph.Node{}
 
-	for _, n := range slices.SortedFunc(g.NodesMatching(types.AllNodes()), util.Compare) {
+	for _, n := range slices.SortedFunc(g.NodesMatching(graph.AllNodes()), util.Compare) {
 		if !cfg.KeepNode(g, n) {
 			continue
 		}
-		mm := types.NewMajorMinorFromVersion(n.Version)
+		mm := graph.NewMajorMinorFromVersion(n.Version)
 		bundleMinorVersions[mm] = append(bundleMinorVersions[mm], n)
 	}
 
@@ -140,7 +143,7 @@ func Mermaid(g *types.Graph, cfg MermaidConfig) string {
 			// TODO: Use cfg.NodeText
 			sb.WriteString(fmt.Sprintf("    %s:::%s\n", to.VR(), class))
 
-			for _, from := range slices.SortedFunc(types.NodeIterator(g.To(to.ID())), util.Compare) {
+			for _, from := range slices.SortedFunc(graph.NodeIterator(g.To(to.ID())), util.Compare) {
 				e := g.WeightedEdge(from.ID(), to.ID())
 				if !cfg.KeepNode(g, from) {
 					continue
@@ -170,19 +173,19 @@ func Mermaid(g *types.Graph, cfg MermaidConfig) string {
 	return sb.String()
 }
 
-func fillStyle(lfp types.LifecyclePhase) string {
+func fillStyle(lfp graph.LifecyclePhase) string {
 	return fmt.Sprintf("fill:%s", colorForLifecyclePhase(lfp).Hex())
 }
 
-func colorForLifecyclePhase(lfp types.LifecyclePhase) colorful.Color {
+func colorForLifecyclePhase(lfp graph.LifecyclePhase) colorful.Color {
 	switch lfp {
-	case types.LifecyclePhasePreGA:
+	case graph.LifecyclePhasePreGA:
 		return colorful.LinearRgb(1, 1, 1)
-	case types.LifecyclePhaseFullSupport:
+	case graph.LifecyclePhaseFullSupport:
 		return colorful.Hsl(100, 1, .9)
-	case types.LifecyclePhaseMaintenance:
+	case graph.LifecyclePhaseMaintenance:
 		return colorful.Hsl(60, 1, .9)
-	case types.LifecyclePhaseEndOfLife:
+	case graph.LifecyclePhaseEndOfLife:
 		return colorful.Hsl(360, 1, .9)
 	case 2:
 		return colorful.Hsl(170, 1, .9)

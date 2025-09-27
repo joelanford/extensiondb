@@ -11,7 +11,7 @@ import (
 	_ "crypto/sha256"
 
 	"github.com/blang/semver/v4"
-	"github.com/joelanford/extensiondb/examples/cincinnati/pkg/types"
+	"github.com/joelanford/extensiondb/examples/cincinnati/pkg/graph"
 	"github.com/joelanford/extensiondb/examples/cincinnati/pkg/viz"
 	"github.com/joelanford/extensiondb/internal/db"
 	"go.podman.io/image/v5/docker/reference"
@@ -24,7 +24,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	var tmpl types.Template
+	var tmpl graph.Template
 	if err := yaml.Unmarshal(fileData, &tmpl); err != nil {
 		log.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	ng, err := types.NewGraph(types.GraphConfig{
+	ng, err := graph.NewGraph(graph.GraphConfig{
 		Streams:      tmpl.VersionStreams,
 		Nodes:        nodes,
 		AsOf:         time.Now(),
@@ -59,9 +59,13 @@ func main() {
 		log.Fatal(err)
 	}
 
-	for n := range ng.NodesMatching(types.NodeInRange(semver.MustParseRange("3.13.0"))) {
-		fmt.Printf("Planning update of %s %s to some 3.14 version with a platform upgrade to 4.16...", n.Name, n.VR())
-		up, err := ng.PlanPlatformUpgrade(n, types.NodeInRange(semver.MustParseRange(">=3.14.0 <3.15.0-0")), types.MajorMinor{4, 14}, types.MajorMinor{4, 16})
+	for n := range ng.NodesMatching(graph.NodeInRange(semver.MustParseRange("3.8.0"))) {
+		fmt.Printf("Planning update of %s %s to 3.15 version with a platform upgrade from 4.12 to 4.19...", n.Name, n.VR())
+		up, err := ng.PlanOpenShiftPlatformUpgrade(n,
+			graph.NodeInRange(semver.MustParseRange(">=3.15.0 <3.16.0-0")),
+			graph.MajorMinor{4, 12},
+			graph.MajorMinor{4, 19},
+		)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -70,8 +74,8 @@ func main() {
 			fmt.Printf("  %d. Update %s from %s to %s\n", i+1, us.Name(), us.From(), us.To())
 		}
 	}
-	nm := viz.Mermaid(ng, viz.MermaidConfig{KeepEdge: func(g *types.Graph, from *types.Node, to *types.Node, w float64) bool {
-		shortestPathTo := map[*types.Node][]ggraph.Node{}
+	nm := viz.Mermaid(ng, viz.MermaidConfig{KeepEdge: func(g *graph.Graph, from *graph.Node, to *graph.Node, w float64) bool {
+		shortestPathTo := map[*graph.Node][]ggraph.Node{}
 		for head := range g.Heads() {
 			sp, _, _ := g.Paths().Between(from.ID(), to.ID())
 			if len(sp) == 0 {
@@ -82,7 +86,7 @@ func main() {
 
 		// Only keep edges that are on the way to full support
 		for head, sp := range shortestPathTo {
-			if head.LifecyclePhase == types.LifecyclePhaseFullSupport && sp[0] == to {
+			if head.LifecyclePhase == graph.LifecyclePhaseFullSupport && sp[0] == to {
 				return true
 			}
 		}
@@ -93,7 +97,7 @@ func main() {
 	}
 }
 
-func queryNodes(ctx context.Context, pdb *db.DB, refs []types.CanonicalReference) ([]*types.Node, error) {
+func queryNodes(ctx context.Context, pdb *db.DB, refs []graph.CanonicalReference) ([]*graph.Node, error) {
 	placeholders := make([]string, 0, len(refs))
 	params := make([]any, 0, len(refs)*2)
 	for i, ref := range refs {
@@ -114,10 +118,10 @@ func queryNodes(ctx context.Context, pdb *db.DB, refs []types.CanonicalReference
 	}
 	defer rows.Close()
 
-	var nodes []*types.Node
+	var nodes []*graph.Node
 	for rows.Next() {
 		var (
-			n   types.Node
+			n   graph.Node
 			ref string
 		)
 		if err := rows.Scan(&n.Name, &n.Version, &n.Release, &ref, &n.ReleaseDate); err != nil {

@@ -3,11 +3,9 @@ module github.com/joelanford/extensiondb
 go 1.25.1
 
 require (
-	github.com/RyanCarrier/dijkstra/v2 v2.0.2
 	github.com/blang/semver/v4 v4.0.0
 	github.com/containerd/containerd v1.7.28
 	github.com/containers/image/v5 v5.36.2
-	github.com/dominikbraun/graph v0.23.0
 	github.com/golang-migrate/migrate/v4 v4.18.3
 	github.com/joelanford/imageutil v0.0.0-20250908121429-ad1dc3737eba
 	github.com/lib/pq v1.10.9
@@ -16,8 +14,6 @@ require (
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/operator-framework/api v0.34.0
 	github.com/operator-framework/operator-registry v1.57.0
-	github.com/spf13/cobra v1.9.1
-	github.com/spf13/pflag v1.0.7
 	go.podman.io/image/v5 v5.37.0
 	golang.org/x/sync v0.16.0
 	gonum.org/v1/gonum v0.16.0
@@ -108,6 +104,8 @@ require (
 	github.com/prometheus/common v0.65.0 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
+	github.com/spf13/cobra v1.9.1 // indirect
+	github.com/spf13/pflag v1.0.7 // indirect
 	github.com/stoewer/go-strcase v1.3.1 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/ulikunitz/xz v0.5.15 // indirect

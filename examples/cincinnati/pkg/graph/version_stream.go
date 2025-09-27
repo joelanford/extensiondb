@@ -1,4 +1,4 @@
-package types
+package graph
 
 import (
 	"github.com/blang/semver/v4"

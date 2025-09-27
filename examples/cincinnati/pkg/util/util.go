@@ -15,6 +15,14 @@ func KeySlice[K comparable, V any](s []V, key func(V) K) map[K]V {
 	return m
 }
 
+func MapSlice[I, O any](in []I, key func(I) O) []O {
+	out := make([]O, len(in))
+	for i := range in {
+		out[i] = key(in[i])
+	}
+	return out
+}
+
 func OrderedMap[K comparable, V any](m map[K]V, cmp func(a, b K) int) iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
 		orderedKeys := slices.SortedFunc(maps.Keys(m), cmp)

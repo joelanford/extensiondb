@@ -1,4 +1,4 @@
-package types
+package graph
 
 import (
 	"errors"
@@ -96,7 +96,7 @@ func (g *Graph) buildEdges(cfg GraphConfig) error {
 
 		to.SupportedPlatformVersions = sets.New[MajorMinor](stream.SupportedPlatformVersions...)
 		to.LifecyclePhase = stream.LifecycleDates.Phase(cfg.AsOf)
-		
+
 		if !cfg.IncludePreGA && to.LifecyclePhase == LifecyclePhasePreGA {
 			continue
 		}
@@ -207,75 +207,4 @@ func (g *Graph) assignEdgeWeights() {
 			g.SetWeightedEdge(simple.WeightedEdge{F: from, T: to, W: float64(i + 1)})
 		}
 	}
-}
-
-func (g *Graph) PlanPlatformUpgrade(fromNode *Node, desiredToNodes NodePredicate, fromPlatform MajorMinor, toPlatform MajorMinor) (UpdatePlan, error) {
-	if desiredToNodes == nil {
-		desiredToNodes = AllNodes()
-	}
-
-	var candidateNodes []*Node
-	for toGraphNode := range NodeIterator(g.Nodes()) {
-		if !desiredToNodes(g, toGraphNode) {
-			continue
-		}
-		if !toGraphNode.SupportedPlatformVersions.HasAll(fromPlatform, toPlatform) {
-			continue
-		}
-		candidateNodes = append(candidateNodes, toGraphNode)
-	}
-	if len(candidateNodes) == 0 {
-		return nil, fmt.Errorf("no desired nodes are supported on both platforms %s and %s", fromPlatform, toPlatform)
-	}
-
-	type shortestPath struct {
-		updatePath []graph.Node
-		weight     float64
-	}
-	var sp *shortestPath
-	for _, toNode := range candidateNodes {
-		// No node update required. fromNode is supported on toPlatform.
-		if fromNode == toNode {
-			sp = &shortestPath{
-				updatePath: []graph.Node{toNode},
-				weight:     0,
-			}
-			break
-		}
-		updatePath, weight := path.DijkstraFromTo(fromNode, toNode, g)
-		if len(updatePath) == 0 {
-			continue
-		}
-		if sp == nil || weight < sp.weight {
-			sp = &shortestPath{updatePath: updatePath, weight: weight}
-		}
-	}
-	if sp == nil {
-		return nil, fmt.Errorf("no paths found from node %s to any other desired node", fromNode.NVR())
-	}
-	var (
-		up          UpdatePlan
-		curNode     = fromNode
-		curPlatform = fromPlatform
-	)
-	for i := 1; i < len(sp.updatePath); i++ {
-		to := sp.updatePath[i].(*Node)
-		up = append(up, NodeUpdateStep{
-			FromNode: curNode,
-			ToNode:   to,
-		})
-		curNode = to
-	}
-
-	for curPlatform.Compare(toPlatform) != 0 {
-		nextPlatform := MajorMinor{Major: curPlatform.Major, Minor: curPlatform.Minor + 1}
-		up = append(up, PlatformUpdateStep{
-			PlatformName: "OpenShift",
-			FromPlatform: curPlatform,
-			ToPlatform:   nextPlatform,
-		})
-		curPlatform = nextPlatform
-	}
-
-	return up, nil
 }
