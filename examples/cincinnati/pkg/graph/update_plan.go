@@ -2,9 +2,12 @@ package graph
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 
+	"github.com/joelanford/extensiondb/examples/cincinnati/pkg/util"
 	"gonum.org/v1/gonum/graph"
-	"gonum.org/v1/gonum/graph/path"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 type UpdatePlan []UpdateStep
@@ -53,32 +56,55 @@ func (nu NodeUpdateStep) To() string {
 	return nu.ToNode.VR()
 }
 
+// PlanOpenShiftPlatformUpgrade plans an update from fromPlatform to toPlatform with consideration for the node
+// updates from fromNode.
+//
+// If fromPlatform's minor version is even, toPlatform must be "minor+1" or "minor+2". If fromPlatform's minor version
+// is odd, toPlatform must be "minor+1". Any other combination of fromPlatform and toPlatform results in an error.
+//
+// PlanOpenShiftPlatform interrogates the graph to find desired nodes that are supported on all platform
+// versions that will be traversed during a platform update, and from that set chooses the shortest path from
+// fromNode.
+//
+// If fromNode is supported on all traversed platform versions, the returned plan will not suggest any node
+// updates.
 func (g *Graph) PlanOpenShiftPlatformUpgrade(fromNode *Node, desiredToNodes NodePredicate, fromPlatform MajorMinor, toPlatform MajorMinor) (UpdatePlan, error) {
 	if desiredToNodes == nil {
 		desiredToNodes = AllNodes()
 	}
 
+	if err := validateOpenShiftUpdate(fromPlatform, toPlatform); err != nil {
+		return nil, fmt.Errorf("invalid openshift platform update: %v", err)
+	}
+
+	traversedPlatformVersions := sets.New[MajorMinor]()
+	for curPlatform := fromPlatform; curPlatform.Compare(toPlatform) <= 0; curPlatform.Minor++ {
+		traversedPlatformVersions.Insert(curPlatform)
+	}
+
+	// TODO: This planning algorithm assumes that extension upgrades will happen before a platform upgrade and never
+	//   after a platform upgrade. But platform-aligned extensions may want their users to:
+	//     - traverse a platform update to X.Y with an extension aligned to X.Y-1
+	//     - after the platform update to X.Y succeeds, update the extension to a version aligned with X.Y
+	//   To do this, we need to have more extension metadata to distinguish between "fully supported on X.Y" and
+	//   "functionally works on X.Y but only supported as an intermediate state on the way to the X.Y-aligned version"
+
 	var candidateNodes []*Node
-	for toGraphNode := range NodeIterator(g.Nodes()) {
-		if !desiredToNodes(g, toGraphNode) {
+	for toNode := range NodeIterator(g.Nodes()) {
+		if !desiredToNodes(g, toNode) {
 			continue
 		}
-		// TODO: Many operator support lifecycles will not support the final desired
-		//  destination version on every platform between fromPlatform and toPlatform.
-		//  ..
-		//  This needs to be updated such that can have a plan like:
-		//    1. Update operator
-		//    2. Update platform
-		//    3. Update operator
-		//    4. Update platform
-		//    5. (possibly) Update operator after upgrading to desired platform
-		if !toGraphNode.SupportedPlatformVersions.HasAll(fromPlatform, toPlatform) {
+
+		if !toNode.SupportedPlatformVersions.IsSuperset(traversedPlatformVersions) {
 			continue
 		}
-		candidateNodes = append(candidateNodes, toGraphNode)
+		candidateNodes = append(candidateNodes, toNode)
 	}
 	if len(candidateNodes) == 0 {
-		return nil, fmt.Errorf("no desired nodes are supported on both platforms %s and %s", fromPlatform, toPlatform)
+		orderedPlatformVersions := traversedPlatformVersions.UnsortedList()
+		slices.SortFunc(orderedPlatformVersions, util.Compare)
+		orderedPlatformVersionStrs := util.MapSlice(orderedPlatformVersions, func(mm MajorMinor) string { return mm.String() })
+		return nil, fmt.Errorf("no desired extensions are supported on all traversed platform versions (%v)", strings.Join(orderedPlatformVersionStrs, ", "))
 	}
 
 	type shortestPath struct {
@@ -87,18 +113,7 @@ func (g *Graph) PlanOpenShiftPlatformUpgrade(fromNode *Node, desiredToNodes Node
 	}
 	var sp *shortestPath
 	for _, toNode := range candidateNodes {
-		// No node update required. fromNode is supported on toPlatform.
-		if fromNode == toNode {
-			sp = &shortestPath{
-				updatePath: []graph.Node{toNode},
-				weight:     0,
-			}
-			break
-		}
-		updatePath, weight := path.DijkstraFromTo(fromNode, toNode, g)
-		if len(updatePath) == 0 {
-			continue
-		}
+		updatePath, weight, _ := g.Paths().Between(fromNode.ID(), toNode.ID())
 		if sp == nil || weight < sp.weight {
 			sp = &shortestPath{updatePath: updatePath, weight: weight}
 		}
@@ -118,43 +133,37 @@ func (g *Graph) PlanOpenShiftPlatformUpgrade(fromNode *Node, desiredToNodes Node
 		})
 		curNode = to
 	}
-
-	ocpSteps, err := ocpPlatformUpdatePath(fromPlatform, toPlatform)
-	if err != nil {
-		return nil, err
-	}
-	for _, ocpStep := range ocpSteps {
-		up = append(up, ocpStep)
+	if fromPlatform != toPlatform {
+		up = append(up, PlatformUpdateStep{
+			PlatformName: "OpenShift",
+			FromPlatform: fromPlatform,
+			ToPlatform:   toPlatform,
+		})
 	}
 
 	return up, nil
 }
 
-func ocpPlatformUpdatePath(from MajorMinor, to MajorMinor) ([]PlatformUpdateStep, error) {
+func validateOpenShiftUpdate(from MajorMinor, to MajorMinor) error {
 	diff := from.Compare(to)
 	if diff == 0 {
-		return nil, nil
+		return nil
 	}
 	if diff > 0 {
-		return nil, fmt.Errorf("invalid from and to: from is greater than to")
+		return fmt.Errorf("downgrading from %s to %s is not supported", from.String(), to.String())
 	}
 	if from.Major != to.Major {
-		return nil, fmt.Errorf("invalid from and to: cannot automatically update across major versions")
+		return fmt.Errorf("updating from major version %d to major version %d is not supported", from.Major, to.Major)
 	}
-	cur := from
-	var steps []PlatformUpdateStep
-	for cur != to {
-		if cur.Minor%2 == 0 && cur.Minor+2 <= to.Minor {
-			cur.Minor += 2
-		} else {
-			cur.Minor += 1
-		}
-		steps = append(steps, PlatformUpdateStep{
-			PlatformName: "OpenShift",
-			FromPlatform: from,
-			ToPlatform:   cur,
-		})
-		from = cur
+
+	evenMinor := from.Minor%2 == 0
+	maxTo := MajorMinor{Major: from.Major, Minor: from.Minor + 1}
+	if evenMinor {
+		maxTo.Minor = from.Minor + 2
 	}
-	return steps, nil
+	if to.Compare(maxTo) > 0 {
+		return fmt.Errorf("furthest supported update from %s is to %s", from, maxTo)
+	}
+
+	return nil
 }

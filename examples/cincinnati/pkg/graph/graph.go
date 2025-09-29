@@ -55,6 +55,15 @@ func (g *Graph) Paths() path.AllShortest {
 	return g.paths
 }
 
+func (g *Graph) FirstNodeMatching(match NodePredicate) *Node {
+	for n := range NodeIterator(g.Nodes()) {
+		if match(g, n) {
+			return n
+		}
+	}
+	return nil
+}
+
 func (g *Graph) NodesMatching(match NodePredicate) iter.Seq[*Node] {
 	it := NodeIterator(g.Nodes())
 	return func(yield func(*Node) bool) {
