@@ -187,15 +187,6 @@ func (g *Graph) initializeEdgesTo(froms []*Node, to *Node, minimumUpdateVersion 
 			continue
 		}
 
-		// Don't update into a "worse" lifecycle state
-		if from.LifecyclePhase < to.LifecyclePhase {
-			continue
-		}
-		// Don't update across minor versions into an end-of-life version (even if from is also an end-of-life version)
-		if from.Version.Minor != to.Version.Minor && to.LifecyclePhase == LifecyclePhaseEndOfLife {
-			continue
-		}
-
 		// We don't know from's full set of successors yet. For now, set weight to 1.
 		// Once all edges have been set, we can make a second pass to set better weights.
 		edge := simple.WeightedEdge{F: from, T: to, W: 1}
@@ -203,17 +194,41 @@ func (g *Graph) initializeEdgesTo(froms []*Node, to *Node, minimumUpdateVersion 
 	}
 }
 
+// assignEdgeWeights assigns edge weights to prioritize updating through supported nodes and to higher versions
+// (in that order). It assigns a rank to each node (higher nodes have better support phase and higher versions), and
+// then assigns all incoming edge weights as that node's rank.
+//
+// In order to guarantee that all paths with worse support are worse than all paths with better support,
+// assignEdgeWeights create gaps between ranks when support tiers are crossed. For example, if there are 3 nodes with
+// "full" support with ranks 1, 2, and 3, then traversing upgrades 3 -> 2 -> 1 would have a total sum of 6. Therefore,
+// the best "maintenance" support node needs rank 7 to ensure that all paths through a single "maintenance" support
+// node are worse than the worst path through all "full" supports nodes.
 func (g *Graph) assignEdgeWeights() {
-	for from := range NodeIterator(g.Nodes()) {
-		// We sort the successors in reverse version order. We set up the weights so that graph traversals
-		// prefer updating to higher versions, which reduces the overall number of updates necessary to get
-		// to a desired version.
-		tos := slices.SortedFunc(NodeIterator(g.From(from.ID())), func(a *Node, b *Node) int {
-			return b.Compare(a)
-		})
-		for i, to := range tos {
+	bestNodes := slices.SortedFunc(NodeIterator(g.Nodes()), func(a *Node, b *Node) int {
+		if v := b.LifecyclePhase.Compare(a.LifecyclePhase); v != 0 {
+			return v
+		}
+		return b.Compare(a)
+	})
+
+	const delta = 0.01
+	var (
+		rank                   = float64(0)
+		nextLifecyclePhaseRank = float64(0)
+		curLifecyclePhase      = LifeCyclePhaseUnknown
+	)
+	for _, to := range bestNodes {
+		if curLifecyclePhase != to.LifecyclePhase {
+			curLifecyclePhase = to.LifecyclePhase
+
+			rank = nextLifecyclePhaseRank
+			nextLifecyclePhaseRank = 0
+		}
+		rank += delta
+		nextLifecyclePhaseRank += rank
+		for from := range NodeIterator(g.To(to.ID())) {
 			g.RemoveEdge(from.ID(), to.ID())
-			g.SetWeightedEdge(simple.WeightedEdge{F: from, T: to, W: float64(i + 1)})
+			g.SetWeightedEdge(simple.WeightedEdge{F: from, T: to, W: rank})
 		}
 	}
 }

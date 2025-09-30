@@ -40,7 +40,7 @@ func (n *Node) NVR() string {
 func (n *Node) VR() string {
 	rel := ""
 	if n.Release != nil && *n.Release != "" {
-		rel = fmt.Sprintf("_%s", n.Release)
+		rel = fmt.Sprintf("_%s", *n.Release)
 	}
 	return fmt.Sprintf("%s%s", n.Version, rel)
 }

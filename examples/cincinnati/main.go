@@ -24,11 +24,12 @@ import (
 )
 
 func main() {
-	g, err := newGraphFromFile("./examples/cincinnati/cincinnati.yaml")
+	g, err := newGraphFromFile("./examples/cincinnati/product-templates/quay-operator.cincinnati.yaml")
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	printDirectPathsFrom(g, g.FirstNodeMatching(graph.NodeInRange(semver.MustParseRange("3.9.0"))))
 	printShortestPathsFrom(g, g.FirstNodeMatching(graph.NodeInRange(semver.MustParseRange("3.9.0"))))
 	printUpgradePlans(g)
 
@@ -115,6 +116,27 @@ func queryNodes(ctx context.Context, pdb *db.DB, refs []graph.CanonicalReference
 	return nodes, nil
 }
 
+func printDirectPathsFrom(ng *graph.Graph, from *graph.Node) {
+	type edge struct {
+		from   *graph.Node
+		to     *graph.Node
+		weight float64
+	}
+	var edges []edge
+	for to := range graph.NodeIterator(ng.From(from.ID())) {
+		e := ng.WeightedEdge(from.ID(), to.ID())
+		edges = append(edges, edge{from: from, to: to, weight: e.Weight()})
+	}
+	slices.SortFunc(edges, func(a, b edge) int {
+		return cmp.Compare(a.weight, b.weight)
+	})
+	fmt.Printf("Direct successors of %s:\n", from.VR())
+	for _, e := range edges {
+		fmt.Printf("  %s (%s) --> %s (%s): %.2f\n", e.from.VR(), e.from.LifecyclePhase, e.to.VR(), e.to.LifecyclePhase, e.weight)
+	}
+	fmt.Println()
+}
+
 func printShortestPathsFrom(ng *graph.Graph, fromNode *graph.Node) {
 	type shortestPath struct {
 		path   []*graph.Node
@@ -139,18 +161,19 @@ func printShortestPathsFrom(ng *graph.Graph, fromNode *graph.Node) {
 		}
 		return util.Compare(a.to, b.to)
 	})
-	fmt.Printf("Shortest path from %s to every reachable node:\n", fromNode.VR())
+	fmt.Printf("Shortest path from %s to every higher versioned node:\n", fromNode.VR())
 	for _, sp := range shortestPaths {
 		if sp.weight == math.Inf(1) && sp.from.Compare(sp.to) > 0 {
 			continue
 		}
 
-		fmt.Printf("  %s -> %s: ", sp.from.VR(), sp.to.VR())
+		fmt.Printf("  %s (%s) --> %s (%s):", sp.from.VR(), sp.from.LifecyclePhase, sp.to.VR(), sp.to.LifecyclePhase)
 		if sp.weight == math.Inf(1) {
-			fmt.Printf("no path\n")
+			fmt.Printf(" ∞\n")
 		} else {
-			fmt.Println(sp.weight)
+			fmt.Printf(" %.2f\n", sp.weight)
 		}
+
 	}
 	fmt.Println()
 }

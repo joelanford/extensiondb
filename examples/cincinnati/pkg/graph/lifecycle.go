@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -10,10 +11,11 @@ import (
 type LifecyclePhase int
 
 const (
-	LifecyclePhasePreGA LifecyclePhase = iota - 1
-	LifecyclePhaseFullSupport
+	LifecyclePhaseFullSupport LifecyclePhase = iota
 	LifecyclePhaseMaintenance
-	LifecyclePhaseEndOfLife = math.MaxInt
+	LifecyclePhaseEndOfLife LifecyclePhase = math.MaxInt - 2
+	LifecyclePhasePreGA     LifecyclePhase = math.MaxInt - 1
+	LifeCyclePhaseUnknown   LifecyclePhase = math.MaxInt
 )
 
 func (l LifecyclePhase) String() string {
@@ -31,7 +33,14 @@ func (l LifecyclePhase) String() string {
 	}
 }
 
+func (l LifecyclePhase) Compare(other LifecyclePhase) int {
+	return cmp.Compare(other, l)
+}
+
 func LifecycleExtensionPhase(i int) LifecyclePhase {
+	if i < 1 || i >= int(LifecyclePhaseEndOfLife-1) {
+		panic(fmt.Sprintf("invalid lifecycle extension phase: %d", i))
+	}
 	return LifecyclePhase(i + 1)
 }
 
