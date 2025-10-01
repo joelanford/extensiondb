@@ -1,4 +1,5 @@
 schema: olm.cincinnati
+name: cluster-logging
 versionStreams:
   - version: "5.5"
     lifecycleDates:

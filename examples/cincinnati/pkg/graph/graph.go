@@ -23,17 +23,24 @@ type Graph struct {
 	heads sets.Set[*Node]
 }
 
+type Package struct {
+	Name    string
+	Streams []VersionStream
+	Nodes   []*Node
+}
+
 type GraphConfig struct {
-	Streams      []VersionStream
-	Nodes        []*Node
+	Packages     []Package
 	AsOf         time.Time
 	IncludePreGA bool
 }
 
 func NewGraph(cfg GraphConfig) (*Graph, error) {
 	wg := simple.NewWeightedDirectedGraph(0, math.Inf(1))
-	for _, node := range cfg.Nodes {
-		wg.AddNode(node)
+	for _, pkg := range cfg.Packages {
+		for _, node := range pkg.Nodes {
+			wg.AddNode(node)
+		}
 	}
 
 	g := &Graph{wg: *wg}
@@ -47,7 +54,6 @@ func NewGraph(cfg GraphConfig) (*Graph, error) {
 		heads.Insert(n)
 	}
 	g.heads = heads
-
 	return g, nil
 }
 
@@ -110,35 +116,42 @@ func isHead(g *Graph, n *Node) bool {
 }
 
 func (g *Graph) buildEdges(cfg GraphConfig) error {
-	var (
-		streamsByMajorMinor = util.KeySlice(cfg.Streams, func(s VersionStream) MajorMinor { return s.Version })
-		nodesByReleaseDate  = slices.SortedFunc(NodeIterator(g.wg.Nodes()), func(a, b *Node) int { return a.ReleaseDate.Compare(b.ReleaseDate) })
-		froms               = make([]*Node, 0, len(nodesByReleaseDate))
-		errs                []error
-	)
-	for _, to := range nodesByReleaseDate {
-		toMM := NewMajorMinorFromVersion(to.Version)
-		stream, ok := streamsByMajorMinor[toMM]
-		if !ok {
-			errs = append(errs, fmt.Errorf("node with reference %s has major.minor version %s, but that version is not in an available stream", to.ImageReference.String(), toMM))
-			continue
+	var errs []error
+	for _, pkg := range cfg.Packages {
+		var (
+			streamsByMajorMinor = util.KeySlice(pkg.Streams, func(s VersionStream) MajorMinor { return s.Version })
+			nodesByReleaseDate  = slices.SortedFunc(
+				g.NodesMatching(PackageNodes(pkg.Name)),
+				func(a, b *Node) int {
+					return a.ReleaseDate.Compare(b.ReleaseDate)
+				},
+			)
+			froms = make([]*Node, 0, len(nodesByReleaseDate))
+		)
+		for _, to := range nodesByReleaseDate {
+			toMM := NewMajorMinorFromVersion(to.Version)
+			stream, ok := streamsByMajorMinor[toMM]
+			if !ok {
+				errs = append(errs, fmt.Errorf("node with reference %s has major.minor version %s, but that version is not in an available stream", to.ImageReference.String(), toMM))
+				continue
+			}
+
+			to.SupportedPlatformVersions = sets.New[MajorMinor](stream.SupportedPlatformVersions...)
+			to.LifecyclePhase = stream.LifecycleDates.Phase(cfg.AsOf)
+
+			if !cfg.IncludePreGA && to.LifecyclePhase == LifecyclePhasePreGA {
+				continue
+			}
+
+			g.initializeEdgesTo(froms, to, stream.MinimumUpdateVersion)
+			froms = append(froms, to)
 		}
-
-		to.SupportedPlatformVersions = sets.New[MajorMinor](stream.SupportedPlatformVersions...)
-		to.LifecyclePhase = stream.LifecycleDates.Phase(cfg.AsOf)
-
-		if !cfg.IncludePreGA && to.LifecyclePhase == LifecyclePhasePreGA {
-			continue
-		}
-
-		g.initializeEdgesTo(froms, to, stream.MinimumUpdateVersion)
-		froms = append(froms, to)
+		g.assignEdgeWeights(pkg)
 	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
 
-	g.assignEdgeWeights()
 	return nil
 }
 
@@ -155,19 +168,24 @@ func NodeIterator(it graph.Nodes) iter.Seq[*Node] {
 
 func (cfg *GraphConfig) Validate() error {
 	// TODO: collect errors
-	if len(cfg.Streams) == 0 {
-		return fmt.Errorf("no streams specified")
+	if len(cfg.Packages) == 0 {
+		return errors.New("no packages specified")
 	}
-	for _, stream := range cfg.Streams {
-		if err := stream.LifecycleDates.ValidateOrder(); err != nil {
+	for _, pkg := range cfg.Packages {
+		if len(pkg.Streams) == 0 {
+			return fmt.Errorf("no streams specified")
+		}
+		for _, stream := range pkg.Streams {
+			if err := stream.LifecycleDates.ValidateOrder(); err != nil {
+				return err
+			}
+		}
+		if len(pkg.Nodes) == 0 {
+			return fmt.Errorf("no nodes specified")
+		}
+		if err := validateNodeNames(pkg.Nodes); err != nil {
 			return err
 		}
-	}
-	if len(cfg.Nodes) == 0 {
-		return fmt.Errorf("no nodes specified")
-	}
-	if err := validateNodeNames(cfg.Nodes); err != nil {
-		return err
 	}
 	if cfg.AsOf.IsZero() {
 		return fmt.Errorf("no as-of timestamp specified")
@@ -224,8 +242,8 @@ func (g *Graph) initializeEdgesTo(froms []*Node, to *Node, minimumUpdateVersion 
 // "full" support with ranks 1, 2, and 3, then traversing upgrades 3 -> 2 -> 1 would have a total sum of 6. Therefore,
 // the best "maintenance" support node needs rank 7 to ensure that all paths through a single "maintenance" support
 // node are worse than the worst path through all "full" supports nodes.
-func (g *Graph) assignEdgeWeights() {
-	bestNodes := slices.SortedFunc(NodeIterator(g.wg.Nodes()), func(a *Node, b *Node) int {
+func (g *Graph) assignEdgeWeights(pkg Package) {
+	bestNodes := slices.SortedFunc(g.NodesMatching(PackageNodes(pkg.Name)), func(a *Node, b *Node) int {
 		if v := b.LifecyclePhase.Compare(a.LifecyclePhase); v != 0 {
 			return v
 		}

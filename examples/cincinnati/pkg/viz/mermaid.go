@@ -109,7 +109,7 @@ func defaultEdgeStyle() func(*graph.Graph, *graph.Node, *graph.Node, float64) st
 	}
 }
 
-func Mermaid(g *graph.Graph, cfg MermaidConfig) string {
+func Mermaid(g *graph.Graph, pkg string, cfg MermaidConfig) string {
 	defaultMermaidConfig(&cfg)
 
 	var sb strings.Builder
@@ -117,7 +117,7 @@ func Mermaid(g *graph.Graph, cfg MermaidConfig) string {
 
 	bundleMinorVersions := map[graph.MajorMinor][]*graph.Node{}
 
-	for _, n := range slices.SortedFunc(g.NodesMatching(graph.AllNodes()), util.Compare) {
+	for _, n := range slices.SortedFunc(g.NodesMatching(graph.PackageNodes(pkg)), util.Compare) {
 		if !cfg.KeepNode(g, n) {
 			continue
 		}

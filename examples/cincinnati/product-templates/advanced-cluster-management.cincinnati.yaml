@@ -1,4 +1,5 @@
 schema: olm.cincinnati
+name: advanced-cluster-management
 versionStreams:
   - version: "2.6"
     lifecycleDates:

@@ -1,4 +1,5 @@
 schema: olm.cincinnati
+name: quay-operator
 versionStreams:
   - version: "3.7"
     lifecycleDates:

@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -24,33 +25,46 @@ import (
 )
 
 func main() {
-	g, err := newGraphFromFile("./examples/cincinnati/product-templates/quay-operator.cincinnati.yaml")
+	g, err := newGraphFromFile("./examples/cincinnati/product-templates")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	printDirectPathsFrom(g, g.FirstNodeMatching(graph.NodeInRange(semver.MustParseRange("3.9.0"))))
-	printShortestPathsFrom(g, g.FirstNodeMatching(graph.NodeInRange(semver.MustParseRange("3.9.0"))))
+	quay := g.FirstNodeMatching(graph.AndNodes(
+		graph.PackageNodes("quay-operator"),
+		graph.NodeInRange(semver.MustParseRange("3.9.8")),
+	))
+
+	clusterLogging := g.FirstNodeMatching(graph.AndNodes(
+		graph.PackageNodes("cluster-logging"),
+		graph.NodeInRange(semver.MustParseRange("6.0.8")),
+	))
+
+	acm := g.FirstNodeMatching(graph.AndNodes(
+		graph.PackageNodes("advanced-cluster-management"),
+		graph.NodeInRange(semver.MustParseRange("2.11.1")),
+	))
+
+	printDirectPathsFrom(g, quay)
+	printDirectPathsFrom(g, clusterLogging)
+	printDirectPathsFrom(g, acm)
+	printShortestPathsFrom(g, quay)
+	printShortestPathsFrom(g, clusterLogging)
+	printShortestPathsFrom(g, acm)
 	printUpgradePlans(g)
 
-	if err := writeMermaidFile(g, "./examples/cincinnati/graph.mmd"); err != nil {
+	if err := writeMermaidFile(g, "./examples/cincinnati", "quay-operator"); err != nil {
+		log.Fatal(err)
+	}
+	if err := writeMermaidFile(g, "./examples/cincinnati", "cluster-logging"); err != nil {
+		log.Fatal(err)
+	}
+	if err := writeMermaidFile(g, "./examples/cincinnati", "advanced-cluster-management"); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func newGraphFromFile(path string) (*graph.Graph, error) {
-	fileData, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var tmpl graph.Template
-	if err := yaml.Unmarshal(fileData, &tmpl); err != nil {
-		return nil, err
-	}
-	if err := tmpl.Validate(); err != nil {
-		return nil, err
-	}
-
 	pdb, err := db.NewDB(db.Config{
 		Host:     "localhost",
 		Port:     5432,
@@ -63,14 +77,38 @@ func newGraphFromFile(path string) (*graph.Graph, error) {
 		return nil, err
 	}
 
-	nodes, err := queryNodes(context.TODO(), pdb, tmpl.Images)
+	entries, err := os.ReadDir(path)
 	if err != nil {
 		return nil, err
 	}
+	packages := make([]graph.Package, len(entries))
+	for _, entry := range entries {
+		filename := filepath.Join(path, entry.Name())
+		fileData, err := os.ReadFile(filename)
+		if err != nil {
+			return nil, err
+		}
+		var tmpl graph.Template
+		if err := yaml.Unmarshal(fileData, &tmpl); err != nil {
+			return nil, err
+		}
+		if err := tmpl.Validate(); err != nil {
+			return nil, err
+		}
+
+		nodes, err := queryNodes(context.TODO(), pdb, tmpl.Images)
+		if err != nil {
+			return nil, err
+		}
+		packages = append(packages, graph.Package{
+			Name:    tmpl.Name,
+			Nodes:   nodes,
+			Streams: tmpl.VersionStreams,
+		})
+	}
 
 	return graph.NewGraph(graph.GraphConfig{
-		Streams:      tmpl.VersionStreams,
-		Nodes:        nodes,
+		Packages:     packages,
 		AsOf:         time.Now(),
 		IncludePreGA: false,
 	})
@@ -130,7 +168,7 @@ func printDirectPathsFrom(ng *graph.Graph, from *graph.Node) {
 	slices.SortFunc(edges, func(a, b edge) int {
 		return cmp.Compare(a.weight, b.weight)
 	})
-	fmt.Printf("Direct successors of %s:\n", from.VR())
+	fmt.Printf("Direct successors of %s:\n", from.NVR())
 	for _, e := range edges {
 		fmt.Printf("  %s (%s) --> %s (%s): %.2f\n", e.from.VR(), e.from.LifecyclePhase, e.to.VR(), e.to.LifecyclePhase, e.weight)
 	}
@@ -161,131 +199,116 @@ func printShortestPathsFrom(ng *graph.Graph, fromNode *graph.Node) {
 		}
 		return util.Compare(a.to, b.to)
 	})
-	fmt.Printf("Shortest path from %s to every higher versioned node:\n", fromNode.VR())
+	fmt.Printf("Shortest path from %s to every descendent:\n", fromNode.NVR())
 	for _, sp := range shortestPaths {
-		if sp.weight == math.Inf(1) && sp.from.Compare(sp.to) > 0 {
+		if sp.weight == math.Inf(1) {
 			continue
 		}
-
-		fmt.Printf("  %s (%s) --> %s (%s):", sp.from.VR(), sp.from.LifecyclePhase, sp.to.VR(), sp.to.LifecyclePhase)
-		if sp.weight == math.Inf(1) {
-			fmt.Printf(" ∞\n")
-		} else {
-			fmt.Printf(" %.2f\n", sp.weight)
-		}
-
+		fmt.Printf("  %s (%s) --> %s (%s): %.2f\n", sp.from.VR(), sp.from.LifecyclePhase, sp.to.VR(), sp.to.LifecyclePhase, sp.weight)
 	}
 	fmt.Println()
 }
 
 func printUpgradePlans(ng *graph.Graph) {
+	type nodePlan struct {
+		name    string
+		from    semver.Version
+		toRange string
+	}
 	type planCfg struct {
-		fromVersion     semver.Version
-		desiredNodeDesc string
-		desiredNodes    graph.NodePredicate
-		fromPlatform    graph.MajorMinor
-		toPlatform      graph.MajorMinor
+		nodePlans    []nodePlan
+		fromPlatform graph.MajorMinor
+		toPlatform   graph.MajorMinor
 	}
 
 	for _, cfg := range []planCfg{
 		{
-			desiredNodeDesc: "3.14.x",
-			fromVersion:     semver.MustParse("3.9.0"),
-			desiredNodes:    graph.NodeInRange(semver.MustParseRange(">=3.14.0 <3.15.0-0")),
-			fromPlatform:    graph.MajorMinor{Major: 4, Minor: 12},
-			toPlatform:      graph.MajorMinor{Major: 4, Minor: 14},
+			nodePlans: []nodePlan{
+				{name: "quay-operator", from: semver.MustParse("3.9.8"), toRange: ">=3.14.0 <3.15.0-0"},
+				{name: "cluster-logging", from: semver.MustParse("5.6.1"), toRange: ">=6.3.0 <6.4.0-0"},
+				{name: "advanced-cluster-management", from: semver.MustParse("2.7.1"), toRange: ">=2.13.0 <2.14.0-0"},
+			},
+			fromPlatform: graph.MajorMinor{Major: 4, Minor: 12},
+			toPlatform:   graph.MajorMinor{Major: 4, Minor: 14},
 		},
 		{
-			desiredNodeDesc: "any version",
-			fromVersion:     semver.MustParse("3.9.0"),
-			desiredNodes:    graph.AllNodes(),
-			fromPlatform:    graph.MajorMinor{Major: 4, Minor: 12},
-			toPlatform:      graph.MajorMinor{Major: 4, Minor: 14},
+			nodePlans: []nodePlan{
+				{name: "quay-operator", from: semver.MustParse("3.9.8")},
+				{name: "cluster-logging", from: semver.MustParse("5.6.1")},
+				{name: "advanced-cluster-management", from: semver.MustParse("2.7.1")},
+			},
+			fromPlatform: graph.MajorMinor{Major: 4, Minor: 12},
+			toPlatform:   graph.MajorMinor{Major: 4, Minor: 14},
 		},
 		{
-			desiredNodeDesc: "3.14.z",
-			fromVersion:     semver.MustParse("3.9.0"),
-			desiredNodes:    graph.NodeInRange(semver.MustParseRange(">=3.14.0 <3.15.0-0")),
-			fromPlatform:    graph.MajorMinor{Major: 4, Minor: 14},
-			toPlatform:      graph.MajorMinor{Major: 4, Minor: 16},
+			nodePlans: []nodePlan{
+				{name: "quay-operator", from: semver.MustParse("3.9.8"), toRange: ">=3.14.0 <3.15.0-0"},
+				{name: "cluster-logging", from: semver.MustParse("5.6.1"), toRange: ">=5.9.0 <5.10.0-0"},
+				{name: "advanced-cluster-management", from: semver.MustParse("2.7.1")},
+			},
+			fromPlatform: graph.MajorMinor{Major: 4, Minor: 14},
+			toPlatform:   graph.MajorMinor{Major: 4, Minor: 16},
 		},
 		{
-			desiredNodeDesc: "3.10.z",
-			fromVersion:     semver.MustParse("3.9.0"),
-			desiredNodes:    graph.NodeInRange(semver.MustParseRange(">=3.10.0 <3.11.0-0")),
-			fromPlatform:    graph.MajorMinor{Major: 4, Minor: 14},
-			toPlatform:      graph.MajorMinor{Major: 4, Minor: 15},
+			nodePlans: []nodePlan{
+				{name: "quay-operator", from: semver.MustParse("3.15.2")},
+				{name: "cluster-logging", from: semver.MustParse("6.3.1")},
+				{name: "advanced-cluster-management", from: semver.MustParse("2.13.4")},
+			},
+			fromPlatform: graph.MajorMinor{Major: 4, Minor: 19},
+			toPlatform:   graph.MajorMinor{Major: 4, Minor: 19},
 		},
 		{
-			desiredNodeDesc: "any version",
-			fromVersion:     semver.MustParse("3.9.0"),
-			desiredNodes:    graph.NodeInRange(semver.MustParseRange(">=3.14.0 <3.15.0-0")),
-			fromPlatform:    graph.MajorMinor{Major: 4, Minor: 15},
-			toPlatform:      graph.MajorMinor{Major: 4, Minor: 17},
+			fromPlatform: graph.MajorMinor{Major: 4, Minor: 15},
+			toPlatform:   graph.MajorMinor{Major: 4, Minor: 17},
 		},
 		{
-			desiredNodeDesc: "any version",
-			fromVersion:     semver.MustParse("3.9.0"),
-			desiredNodes:    graph.NodeInRange(semver.MustParseRange(">=3.14.0 <3.15.0-0")),
-			fromPlatform:    graph.MajorMinor{Major: 4, Minor: 16},
-			toPlatform:      graph.MajorMinor{Major: 4, Minor: 19},
-		},
-		{
-			desiredNodeDesc: "any version",
-			fromVersion:     semver.MustParse("3.7.10"),
-			desiredNodes:    graph.NodeInRange(semver.MustParseRange(">=3.15.0 <3.16.0-0")),
-			fromPlatform:    graph.MajorMinor{Major: 4, Minor: 14},
-			toPlatform:      graph.MajorMinor{Major: 4, Minor: 15},
-		},
-		{
-			desiredNodeDesc: "any version",
-			fromVersion:     semver.MustParse("3.14.3"),
-			desiredNodes:    graph.AllNodes(),
-			fromPlatform:    graph.MajorMinor{Major: 4, Minor: 17},
-			toPlatform:      graph.MajorMinor{Major: 4, Minor: 18},
+			fromPlatform: graph.MajorMinor{Major: 4, Minor: 16},
+			toPlatform:   graph.MajorMinor{Major: 4, Minor: 19},
 		},
 	} {
-		fmt.Printf("Update plan for OCP %s to %s, and quay-operator from %s to %s:\n", cfg.fromPlatform, cfg.toPlatform, cfg.fromVersion.String(), cfg.desiredNodeDesc)
-		node := ng.FirstNodeMatching(graph.NodeInRange(semver.MustParseRange(cfg.fromVersion.String())))
-		if node == nil {
-			fmt.Printf("  ERROR: could not find node with version %s\n\n", cfg.fromVersion.String())
-			continue
+		installedOperators := []string{}
+		nodeUpdates := []graph.NodeUpdateRequest{}
+		for _, np := range cfg.nodePlans {
+			toPredicate := graph.AllNodes()
+			if np.toRange != "" {
+				toPredicate = graph.NodeInRange(semver.MustParseRange(np.toRange))
+			}
+			installedOperators = append(installedOperators, fmt.Sprintf("%s.v%s", np.name, np.from))
+			nodeUpdates = append(nodeUpdates, graph.NodeUpdateRequest{
+				From: ng.FirstNodeMatching(graph.NodeInRange(semver.MustParseRange(np.from.String()))),
+				To:   toPredicate,
+			})
 		}
-		up, err := ng.PlanOpenShiftPlatformUpgrade(
-			node,
-			cfg.desiredNodes,
+
+		up := ng.PlanOpenShiftPlatformUpgrade(
+			nodeUpdates,
 			cfg.fromPlatform,
 			cfg.toPlatform,
 		)
-		if err != nil {
-			fmt.Printf("  ERROR: %v\n\n", err)
-			continue
-		}
-		for i, us := range up {
-			fmt.Printf("  %d. Update %s from %s to %s\n", i+1, us.Name(), us.From(), us.To())
-		}
-		fmt.Println()
+		fmt.Println(up.PrettyReport())
 	}
 }
 
-func writeMermaidFile(ng *graph.Graph, path string) error {
-	nm := viz.Mermaid(ng, viz.MermaidConfig{KeepEdge: func(g *graph.Graph, from *graph.Node, to *graph.Node, w float64) bool {
-		shortestPathTo := map[*graph.Node][]ggraph.Node{}
-		for head := range g.Heads() {
-			sp, _, _ := g.Paths().Between(from.ID(), to.ID())
-			if len(sp) == 0 {
-				continue
-			}
-			shortestPathTo[head] = sp
-		}
+func writeMermaidFile(ng *graph.Graph, dir string, pkg string) error {
+	nm := viz.Mermaid(ng, pkg, viz.MermaidConfig{KeepEdge: onShortestPathToAnyHead})
+	return os.WriteFile(filepath.Join(dir, fmt.Sprintf("mermaid/%s.mmd", pkg)), []byte(nm), 0644)
+}
 
-		// Only keep edges that are on the way to full support
-		for head, sp := range shortestPathTo {
-			if head.LifecyclePhase == graph.LifecyclePhaseFullSupport && sp[0] == to {
-				return true
-			}
+func onShortestPathToAnyHead(g *graph.Graph, from *graph.Node, to *graph.Node, w float64) bool {
+	shortestPathTo := map[*graph.Node][]ggraph.Node{}
+	for head := range g.Heads() {
+		sp, spWeight, _ := g.Paths().Between(from.ID(), head.ID())
+		if spWeight == math.Inf(1) {
+			continue
 		}
-		return w <= 3
-	}})
-	return os.WriteFile(path, []byte(nm), 0644)
+		shortestPathTo[head] = sp
+	}
+
+	for _, sp := range shortestPathTo {
+		if len(sp) > 1 && sp[1] == to {
+			return true
+		}
+	}
+	return false
 }

@@ -7,6 +7,7 @@ import (
 
 type Template struct {
 	Schema         string               `json:"schema"`
+	Name           string               `json:"name"`
 	VersionStreams []VersionStream      `json:"versionStreams"`
 	Images         []CanonicalReference `json:"images"`
 }
@@ -17,6 +18,9 @@ func (t *Template) Validate() error {
 	var errs []error
 	if t.Schema != SchemaCincinnati {
 		errs = append(errs, fmt.Errorf("schema must be %q", SchemaCincinnati))
+	}
+	if t.Name == "" {
+		errs = append(errs, fmt.Errorf("name must be set"))
 	}
 	if len(t.VersionStreams) == 0 {
 		errs = append(errs, errors.New("no streams found in template"))
