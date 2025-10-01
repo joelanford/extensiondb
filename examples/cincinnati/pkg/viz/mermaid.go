@@ -143,16 +143,16 @@ func Mermaid(g *graph.Graph, cfg MermaidConfig) string {
 			// TODO: Use cfg.NodeText
 			sb.WriteString(fmt.Sprintf("    %s:::%s\n", to.VR(), class))
 
-			for _, from := range slices.SortedFunc(graph.NodeIterator(g.To(to.ID())), util.Compare) {
-				e := g.WeightedEdge(from.ID(), to.ID())
+			for _, from := range slices.SortedFunc(g.To(to), util.Compare) {
+				weight := g.EdgeWeight(from, to)
 				if !cfg.KeepNode(g, from) {
 					continue
 				}
-				if !cfg.KeepEdge(g, from, to, e.Weight()) {
+				if !cfg.KeepEdge(g, from, to, weight) {
 					continue
 				}
 
-				edgeStyle := cfg.EdgeStyle(g, from, to, e.Weight())
+				edgeStyle := cfg.EdgeStyle(g, from, to, weight)
 				edgeStyles[edgeStyle] = append(edgeStyles[edgeStyle], strconv.Itoa(edgeCount))
 				sb.WriteString(fmt.Sprintf("    %s --> %s\n", from.VR(), to.VR()))
 				edgeCount++

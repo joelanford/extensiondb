@@ -17,7 +17,7 @@ import (
 )
 
 type Graph struct {
-	simple.WeightedDirectedGraph
+	wg simple.WeightedDirectedGraph
 
 	paths path.AllShortest
 	heads sets.Set[*Node]
@@ -36,7 +36,7 @@ func NewGraph(cfg GraphConfig) (*Graph, error) {
 		wg.AddNode(node)
 	}
 
-	g := &Graph{WeightedDirectedGraph: *wg}
+	g := &Graph{wg: *wg}
 	if err := g.buildEdges(cfg); err != nil {
 		return nil, err
 	}
@@ -55,8 +55,29 @@ func (g *Graph) Paths() path.AllShortest {
 	return g.paths
 }
 
+func (g *Graph) To(to *Node) iter.Seq[*Node] {
+	return NodeIterator(g.wg.To(to.ID()))
+}
+
+func (g *Graph) From(from *Node) iter.Seq[*Node] {
+	return NodeIterator(g.wg.From(from.ID()))
+}
+
+type WeightedEdge struct {
+	From, To *Node
+	Weight   float64
+}
+
+func (g *Graph) EdgeWeight(from, to *Node) float64 {
+	w := g.wg.WeightedEdge(from.ID(), to.ID())
+	if w == nil {
+		return math.Inf(1)
+	}
+	return w.Weight()
+}
+
 func (g *Graph) FirstNodeMatching(match NodePredicate) *Node {
-	for n := range NodeIterator(g.Nodes()) {
+	for n := range NodeIterator(g.wg.Nodes()) {
 		if match(g, n) {
 			return n
 		}
@@ -65,7 +86,7 @@ func (g *Graph) FirstNodeMatching(match NodePredicate) *Node {
 }
 
 func (g *Graph) NodesMatching(match NodePredicate) iter.Seq[*Node] {
-	it := NodeIterator(g.Nodes())
+	it := NodeIterator(g.wg.Nodes())
 	return func(yield func(*Node) bool) {
 		for n := range it {
 			if match(g, n) {
@@ -82,7 +103,7 @@ func (g *Graph) Heads() sets.Set[*Node] {
 }
 
 func isHead(g *Graph, n *Node) bool {
-	for range NodeIterator(g.From(n.ID())) {
+	for range NodeIterator(g.wg.From(n.ID())) {
 		return false
 	}
 	return true
@@ -91,7 +112,7 @@ func isHead(g *Graph, n *Node) bool {
 func (g *Graph) buildEdges(cfg GraphConfig) error {
 	var (
 		streamsByMajorMinor = util.KeySlice(cfg.Streams, func(s VersionStream) MajorMinor { return s.Version })
-		nodesByReleaseDate  = slices.SortedFunc(NodeIterator(g.Nodes()), func(a, b *Node) int { return a.ReleaseDate.Compare(b.ReleaseDate) })
+		nodesByReleaseDate  = slices.SortedFunc(NodeIterator(g.wg.Nodes()), func(a, b *Node) int { return a.ReleaseDate.Compare(b.ReleaseDate) })
 		froms               = make([]*Node, 0, len(nodesByReleaseDate))
 		errs                []error
 	)
@@ -190,7 +211,7 @@ func (g *Graph) initializeEdgesTo(froms []*Node, to *Node, minimumUpdateVersion 
 		// We don't know from's full set of successors yet. For now, set weight to 1.
 		// Once all edges have been set, we can make a second pass to set better weights.
 		edge := simple.WeightedEdge{F: from, T: to, W: 1}
-		g.SetWeightedEdge(edge)
+		g.wg.SetWeightedEdge(edge)
 	}
 }
 
@@ -204,7 +225,7 @@ func (g *Graph) initializeEdgesTo(froms []*Node, to *Node, minimumUpdateVersion 
 // the best "maintenance" support node needs rank 7 to ensure that all paths through a single "maintenance" support
 // node are worse than the worst path through all "full" supports nodes.
 func (g *Graph) assignEdgeWeights() {
-	bestNodes := slices.SortedFunc(NodeIterator(g.Nodes()), func(a *Node, b *Node) int {
+	bestNodes := slices.SortedFunc(NodeIterator(g.wg.Nodes()), func(a *Node, b *Node) int {
 		if v := b.LifecyclePhase.Compare(a.LifecyclePhase); v != 0 {
 			return v
 		}
@@ -226,9 +247,9 @@ func (g *Graph) assignEdgeWeights() {
 		}
 		rank += delta
 		nextLifecyclePhaseRank += rank
-		for from := range NodeIterator(g.To(to.ID())) {
-			g.RemoveEdge(from.ID(), to.ID())
-			g.SetWeightedEdge(simple.WeightedEdge{F: from, T: to, W: rank})
+		for from := range NodeIterator(g.wg.To(to.ID())) {
+			g.wg.RemoveEdge(from.ID(), to.ID())
+			g.wg.SetWeightedEdge(simple.WeightedEdge{F: from, T: to, W: rank})
 		}
 	}
 }

@@ -123,9 +123,9 @@ func printDirectPathsFrom(ng *graph.Graph, from *graph.Node) {
 		weight float64
 	}
 	var edges []edge
-	for to := range graph.NodeIterator(ng.From(from.ID())) {
-		e := ng.WeightedEdge(from.ID(), to.ID())
-		edges = append(edges, edge{from: from, to: to, weight: e.Weight()})
+	for to := range ng.From(from) {
+		weight := ng.EdgeWeight(from, to)
+		edges = append(edges, edge{from: from, to: to, weight: weight})
 	}
 	slices.SortFunc(edges, func(a, b edge) int {
 		return cmp.Compare(a.weight, b.weight)

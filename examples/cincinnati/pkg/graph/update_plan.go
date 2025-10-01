@@ -90,7 +90,7 @@ func (g *Graph) PlanOpenShiftPlatformUpgrade(fromNode *Node, desiredToNodes Node
 	//   "functionally works on X.Y but only supported as an intermediate state on the way to the X.Y-aligned version"
 
 	var candidateNodes []*Node
-	for toNode := range NodeIterator(g.Nodes()) {
+	for toNode := range NodeIterator(g.wg.Nodes()) {
 		if !desiredToNodes(g, toNode) {
 			continue
 		}
