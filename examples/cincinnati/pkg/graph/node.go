@@ -49,5 +49,13 @@ func (n *Node) Compare(other *Node) int {
 	if v := n.Version.Compare(other.Version); v != 0 {
 		return v
 	}
-	return cmp.Compare(n.Name, other.Name)
+	switch {
+	case n.Release == nil && other.Release != nil:
+		return -1
+	case n.Release != nil && other.Release == nil:
+		return 1
+	case n.Release == nil && other.Release == nil:
+		return 0
+	}
+	return cmp.Compare(*n.Release, *other.Release)
 }
