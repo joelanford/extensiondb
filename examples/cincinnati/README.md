@@ -37,3 +37,11 @@ to plan an update of both OCP and all of a customer's layered products.
 
 1. Current logic for building edges inevitably causes some backport releases to have no outgoing edges
    (i.e. they are "heads") despite higher versions existing in the graph. Do we need to worry about this?
+2. Packages that prefer post-platform-update node updates are typically platform-aligned. During EUS-to-EUS updates,
+   are these packages expected users to perform package updates in the intermediate platform version?
+    - Example: Say an operator has versions, 4.16, 4.17, and 4.18, coinciding with OCP versions. Can customers update
+      their clusters from 4.16, through 4.17, and finally to 4.18 all while keeping their operator on a 4.16 supported
+      version? Or are this packages trying to require that customers pause the EUS-to-EUS update on 4.17 in order to
+      perform an update from the 4.16-supported operator to the 4.17-supported operator?
+
+   Joe's opinion: EUS-to-EUS platform updates MUST not require operator updates in the odd-numbered OCP version.

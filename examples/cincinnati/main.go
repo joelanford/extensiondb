@@ -45,12 +45,19 @@ func main() {
 		graph.NodeInRange(semver.MustParseRange("2.11.1")),
 	))
 
+	kubevirt := g.FirstNodeMatching(graph.AndNodes(
+		graph.PackageNodes("kubevirt-hyperconverged"),
+		graph.NodeInRange(semver.MustParseRange("4.12.10")),
+	))
+
 	printDirectPathsFrom(g, quay)
 	printDirectPathsFrom(g, clusterLogging)
 	printDirectPathsFrom(g, acm)
+	printDirectPathsFrom(g, kubevirt)
 	printShortestPathsFrom(g, quay)
 	printShortestPathsFrom(g, clusterLogging)
 	printShortestPathsFrom(g, acm)
+	printShortestPathsFrom(g, kubevirt)
 	printUpgradePlans(g)
 
 	if err := writeMermaidFile(g, "./examples/cincinnati", "quay-operator"); err != nil {
@@ -60,6 +67,9 @@ func main() {
 		log.Fatal(err)
 	}
 	if err := writeMermaidFile(g, "./examples/cincinnati", "advanced-cluster-management"); err != nil {
+		log.Fatal(err)
+	}
+	if err := writeMermaidFile(g, "./examples/cincinnati", "kubevirt-hyperconverged"); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -210,82 +220,41 @@ func printShortestPathsFrom(ng *graph.Graph, fromNode *graph.Node) {
 }
 
 func printUpgradePlans(ng *graph.Graph) {
-	type nodePlan struct {
-		name    string
-		from    semver.Version
-		toRange string
-	}
 	type planCfg struct {
-		nodePlans    []nodePlan
+		nodes        graph.NodePredicate
 		fromPlatform graph.MajorMinor
 		toPlatform   graph.MajorMinor
 	}
-
 	for _, cfg := range []planCfg{
 		{
-			nodePlans: []nodePlan{
-				{name: "quay-operator", from: semver.MustParse("3.9.8"), toRange: ">=3.14.0 <3.15.0-0"},
-				{name: "cluster-logging", from: semver.MustParse("5.6.1"), toRange: ">=6.3.0 <6.4.0-0"},
-				{name: "advanced-cluster-management", from: semver.MustParse("2.7.1"), toRange: ">=2.13.0 <2.14.0-0"},
-			},
+			nodes: graph.OrNodes(
+				graph.AndNodes(graph.PackageNodes("advanced-cluster-management"), graph.NodeInRange(semver.MustParseRange("2.7.1"))),
+				graph.AndNodes(graph.PackageNodes("cluster-logging"), graph.NodeInRange(semver.MustParseRange("5.6.1"))),
+				graph.AndNodes(graph.PackageNodes("kubevirt-hyperconverged"), graph.NodeInRange(semver.MustParseRange("4.12.0"))),
+				graph.AndNodes(graph.PackageNodes("quay-operator"), graph.NodeInRange(semver.MustParseRange("3.9.8"))),
+			),
 			fromPlatform: graph.MajorMinor{Major: 4, Minor: 12},
 			toPlatform:   graph.MajorMinor{Major: 4, Minor: 14},
 		},
 		{
-			nodePlans: []nodePlan{
-				{name: "quay-operator", from: semver.MustParse("3.9.8")},
-				{name: "cluster-logging", from: semver.MustParse("5.6.1")},
-				{name: "advanced-cluster-management", from: semver.MustParse("2.7.1")},
-			},
-			fromPlatform: graph.MajorMinor{Major: 4, Minor: 12},
-			toPlatform:   graph.MajorMinor{Major: 4, Minor: 14},
-		},
-		{
-			nodePlans: []nodePlan{
-				{name: "quay-operator", from: semver.MustParse("3.9.8"), toRange: ">=3.14.0 <3.15.0-0"},
-				{name: "cluster-logging", from: semver.MustParse("5.6.1"), toRange: ">=5.9.0 <5.10.0-0"},
-				{name: "advanced-cluster-management", from: semver.MustParse("2.7.1")},
-			},
+			nodes: graph.OrNodes(
+				graph.AndNodes(graph.PackageNodes("advanced-cluster-management"), graph.NodeInRange(semver.MustParseRange("2.8.8"))),
+				graph.AndNodes(graph.PackageNodes("cluster-logging"), graph.NodeInRange(semver.MustParseRange("5.8.21"))),
+				graph.AndNodes(graph.PackageNodes("kubevirt-hyperconverged"), graph.NodeInRange(semver.MustParseRange("4.14.14"))),
+				graph.AndNodes(graph.PackageNodes("quay-operator"), graph.NodeInRange(semver.MustParseRange("3.10.15"))),
+			),
 			fromPlatform: graph.MajorMinor{Major: 4, Minor: 14},
 			toPlatform:   graph.MajorMinor{Major: 4, Minor: 16},
 		},
-		{
-			nodePlans: []nodePlan{
-				{name: "quay-operator", from: semver.MustParse("3.15.2")},
-				{name: "cluster-logging", from: semver.MustParse("6.3.1")},
-				{name: "advanced-cluster-management", from: semver.MustParse("2.13.4")},
-			},
-			fromPlatform: graph.MajorMinor{Major: 4, Minor: 19},
-			toPlatform:   graph.MajorMinor{Major: 4, Minor: 19},
-		},
-		{
-			fromPlatform: graph.MajorMinor{Major: 4, Minor: 15},
-			toPlatform:   graph.MajorMinor{Major: 4, Minor: 17},
-		},
-		{
-			fromPlatform: graph.MajorMinor{Major: 4, Minor: 16},
-			toPlatform:   graph.MajorMinor{Major: 4, Minor: 19},
-		},
 	} {
-		installedOperators := []string{}
-		nodeUpdates := []graph.NodeUpdateRequest{}
-		for _, np := range cfg.nodePlans {
-			toPredicate := graph.AllNodes()
-			if np.toRange != "" {
-				toPredicate = graph.NodeInRange(semver.MustParseRange(np.toRange))
-			}
-			installedOperators = append(installedOperators, fmt.Sprintf("%s.v%s", np.name, np.from))
-			nodeUpdates = append(nodeUpdates, graph.NodeUpdateRequest{
-				From: ng.FirstNodeMatching(graph.NodeInRange(semver.MustParseRange(np.from.String()))),
-				To:   toPredicate,
-			})
-		}
-
-		up := ng.PlanOpenShiftPlatformUpgrade(
-			nodeUpdates,
+		up, err := ng.PlanOpenShiftUpdate(
+			slices.Collect(ng.NodesMatching(cfg.nodes)),
 			cfg.fromPlatform,
 			cfg.toPlatform,
 		)
+		if err != nil {
+			fmt.Println(err)
+		}
 		fmt.Println(up.PrettyReport())
 	}
 }

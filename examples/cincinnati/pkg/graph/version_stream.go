@@ -5,8 +5,9 @@ import (
 )
 
 type VersionStream struct {
-	Version                   MajorMinor     `json:"version"`
-	MinimumUpdateVersion      semver.Version `json:"minimumUpdateVersion"`
-	LifecycleDates            LifecycleDates `json:"lifecycleDates"`
-	SupportedPlatformVersions []MajorMinor   `json:"supportedPlatformVersions"`
+	Version                        MajorMinor     `json:"version"`
+	MinimumUpdateVersion           semver.Version `json:"minimumUpdateVersion"`
+	LifecycleDates                 LifecycleDates `json:"lifecycleDates"`
+	SupportedPlatformVersions      []MajorMinor   `json:"supportedPlatformVersions"`
+	RequiresUpdatePlatformVersions []MajorMinor   `json:"requiresUpdatePlatformVersions"`
 }

@@ -19,8 +19,9 @@ type Node struct {
 	ReleaseDate    time.Time
 	ImageReference reference.Canonical
 
-	LifecyclePhase            LifecyclePhase
-	SupportedPlatformVersions sets.Set[MajorMinor]
+	LifecyclePhase                 LifecyclePhase
+	SupportedPlatformVersions      sets.Set[MajorMinor]
+	RequiresUpdatePlatformVersions sets.Set[MajorMinor]
 
 	id     int64
 	idOnce sync.Once

@@ -40,3 +40,14 @@ func AndNodes(ps ...NodePredicate) NodePredicate {
 		return true
 	}
 }
+
+func OrNodes(ps ...NodePredicate) NodePredicate {
+	return func(graph *Graph, node *Node) bool {
+		for _, p := range ps {
+			if p(graph, node) {
+				return true
+			}
+		}
+		return false
+	}
+}

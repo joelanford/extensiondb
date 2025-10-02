@@ -137,6 +137,7 @@ func (g *Graph) buildEdges(cfg GraphConfig) error {
 			}
 
 			to.SupportedPlatformVersions = sets.New[MajorMinor](stream.SupportedPlatformVersions...)
+			to.RequiresUpdatePlatformVersions = sets.New[MajorMinor](stream.RequiresUpdatePlatformVersions...)
 			to.LifecyclePhase = stream.LifecycleDates.Phase(cfg.AsOf)
 
 			if !cfg.IncludePreGA && to.LifecyclePhase == LifecyclePhasePreGA {
